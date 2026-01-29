@@ -1,0 +1,168 @@
+# Reusable Kimi Code Review workflow
+# Usage: https://docs.github.com/en/actions/using-workflows/reusing-workflows
+#
+# Example:
+#   jobs:
+#     review:
+#       uses: yetanothercompany/actions/.github/workflows/pr_review_kimi.yml@main
+#       with:
+#         custom_prompt: |
+#           1. **Security vulnerabilities** - Label by criticality...
+#       secrets:
+#         KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+
+name: Kimi PR Review
+
+on:
+  workflow_call:
+    inputs:
+      custom_prompt:
+        description: 'Custom review instructions (what to focus on)'
+        required: true
+        type: string
+      max_lines:
+        description: 'Max lines of diff to review (truncates if larger)'
+        required: false
+        type: number
+        default: 10000
+    secrets:
+      KIMI_API_KEY:
+        required: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Get PR diff
+        id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr diff ${{ github.event.pull_request.number || github.event.issue.number }} --repo ${{ github.repository }} > /tmp/pr_diff.txt
+
+          TOTAL_LINES=$(wc -l < /tmp/pr_diff.txt)
+          MAX_LINES=${{ inputs.max_lines }}
+
+          head -n $MAX_LINES /tmp/pr_diff.txt > /tmp/pr_diff_truncated.txt
+
+          if [ "$TOTAL_LINES" -gt "$MAX_LINES" ]; then
+            echo "truncated=true" >> "$GITHUB_OUTPUT"
+            echo "total_lines=$TOTAL_LINES" >> "$GITHUB_OUTPUT"
+            echo "::warning::Diff truncated from $TOTAL_LINES to $MAX_LINES lines. Some changes were not reviewed."
+          else
+            echo "truncated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Call Kimi API for review
+        id: kimi_review
+        run: |
+          echo "::add-mask::${{ secrets.KIMI_API_KEY }}"
+
+          if [ -z "${{ secrets.KIMI_API_KEY }}" ]; then
+            echo "error=true" >> $GITHUB_OUTPUT
+            echo "error_message=KIMI_API_KEY secret is not set" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          SYSTEM_PROMPT="You are a code reviewer. Review ONLY the changes in the pull request diff, not the entire codebase.
+
+          Focus on:
+
+          ${{ inputs.custom_prompt }}
+
+          If no issues found, say so briefly."
+
+          USER_PROMPT="Review this PR diff and provide feedback on any issues found. Be specific about file names and line numbers when possible:"
+
+          PAYLOAD=$(jq -n \
+            --arg model "moonshot-v1-128k" \
+            --arg system "$SYSTEM_PROMPT" \
+            --arg user "$USER_PROMPT" \
+            --rawfile diff /tmp/pr_diff_truncated.txt \
+            '{
+              model: $model,
+              messages: [
+                { role: "system", content: $system },
+                { role: "user", content: ($user + "\n\nDiff:\n" + $diff) }
+              ],
+              temperature: 0.3,
+              max_tokens: 4096
+            }')
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.moonshot.ai/v1/chat/completions" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.KIMI_API_KEY }}" \
+            -d "$PAYLOAD")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "error=true" >> $GITHUB_OUTPUT
+            echo "error_message=Kimi API request failed with status $HTTP_CODE" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          HAS_ERROR=$(echo "$BODY" | jq -e '.error.message' > /dev/null 2>&1 && echo "yes" || echo "no")
+          if [ "$HAS_ERROR" = "yes" ]; then
+            echo "error=true" >> $GITHUB_OUTPUT
+            echo "error_message=Kimi API returned an error response" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          REVIEW=$(echo "$BODY" | jq -r '.choices[0].message.content // "Error: Unexpected API response"')
+          echo "$REVIEW" > /tmp/review.txt
+          echo "success=true" >> $GITHUB_OUTPUT
+
+      - name: Post review comment
+        if: steps.kimi_review.outputs.success == 'true'
+        uses: actions/github-script@v7
+        env:
+          TRUNCATED: ${{ steps.diff.outputs.truncated }}
+          TOTAL_LINES: ${{ steps.diff.outputs.total_lines }}
+          MAX_LINES: ${{ inputs.max_lines }}
+        with:
+          script: |
+            const fs = require('fs');
+            const review = fs.readFileSync('/tmp/review.txt', 'utf8');
+            const truncated = process.env.TRUNCATED === 'true';
+            const totalLines = process.env.TOTAL_LINES;
+            const maxLines = process.env.MAX_LINES;
+
+            let truncationWarning = '';
+            if (truncated) {
+              truncationWarning = `\n> Warning: Diff was truncated from ${totalLines} to ${maxLines} lines. Some changes were not reviewed.\n`;
+            }
+
+            if (review && review.trim() !== '') {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request?.number || context.issue.number,
+                body: `## Kimi Code Review\n${truncationWarning}\n${review}\n\n---\n*Automated review by Kimi (Moonshot AI)*`
+              });
+            }
+
+      - name: Post error comment
+        if: steps.kimi_review.outputs.error == 'true'
+        uses: actions/github-script@v7
+        env:
+          ERROR_MESSAGE: ${{ steps.kimi_review.outputs.error_message }}
+        with:
+          script: |
+            const errorMessage = process.env.ERROR_MESSAGE || 'Unknown error';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request?.number || context.issue.number,
+              body: `## Kimi Code Review\n\n:warning: Review failed: ${errorMessage}\n\n---\n*Automated review by Kimi (Moonshot AI)*`
+            });
