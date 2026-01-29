@@ -31,7 +31,7 @@ jobs:
        github.event.issue.pull_request &&
        contains(github.event.comment.body, '/claude') &&
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
-    uses: yetanothercompany/actions/.github/workflows/pr_review_claude.yml@main
+    uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@main
     with:
       custom_prompt: |
         1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)
@@ -87,7 +87,7 @@ jobs:
        github.event.issue.pull_request &&
        contains(github.event.comment.body, '/codex') &&
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
-    uses: yetanothercompany/actions/.github/workflows/pr_review_codex.yml@main
+    uses: yetanotherco/actions/.github/workflows/pr_review_codex.yml@main
     with:
       custom_prompt: |
         1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)
@@ -139,7 +139,7 @@ jobs:
        github.event.issue.pull_request &&
        contains(github.event.comment.body, '/kimi') &&
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
-    uses: yetanothercompany/actions/.github/workflows/pr_review_kimi.yml@main
+    uses: yetanotherco/actions/.github/workflows/pr_review_kimi.yml@main
     with:
       custom_prompt: |
         1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)

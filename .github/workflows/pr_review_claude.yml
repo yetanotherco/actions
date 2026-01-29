@@ -4,7 +4,7 @@
 # Example:
 #   jobs:
 #     review:
-#       uses: yetanothercompany/actions/.github/workflows/pr_review_claude.yml@main
+#       uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@main
 #       with:
 #         custom_prompt: |
 #           1. **Security vulnerabilities** - Label by criticality...
