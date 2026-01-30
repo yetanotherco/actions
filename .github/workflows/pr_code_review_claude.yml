@@ -64,4 +64,4 @@ jobs:
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max_turns }}
-          prompt: /code-review --comment
+          prompt: /code-review:code-review --comment
