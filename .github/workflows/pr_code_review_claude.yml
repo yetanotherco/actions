@@ -1,0 +1,67 @@
+# Reusable Claude Code Review workflow using /code-review plugin
+# Usage: https://docs.github.com/en/actions/using-workflows/reusing-workflows
+#
+# This workflow uses the /code-review plugin which:
+# - Launches 4 parallel agents (CLAUDE.md compliance x2, bug detection, git history)
+# - Scores issues 0-100 for confidence, filters <80
+# - Posts formatted review with code links
+#
+# Example:
+#   jobs:
+#     review:
+#       uses: yetanotherco/actions/.github/workflows/pr_code_review_claude.yml@main
+#       secrets:
+#         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+name: Claude Code Review (Plugin)
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        description: 'Claude model to use'
+        required: false
+        type: string
+        default: 'sonnet'
+      max_turns:
+        description: 'Max turns for Claude'
+        required: false
+        type: number
+        default: 30
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Block fork PRs
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          HEAD=$(gh api "${{ github.event.issue.pull_request.url }}" --jq '.head.repo.full_name')
+          BASE=$(gh api "${{ github.event.issue.pull_request.url }}" --jq '.base.repo.full_name')
+          [[ "$HEAD" == "$BASE" ]] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for git blame analysis
+
+      - name: Run Claude Code Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          show_full_output: true
+          claude_args: |
+            --model ${{ inputs.model }}
+            --max-turns ${{ inputs.max_turns }}
+          prompt: /code-review --comment

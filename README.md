@@ -6,7 +6,8 @@ This repository contains reusable GitHub Actions workflows for AI-powered PR cod
 
 | Workflow | AI Model | Description |
 |----------|----------|-------------|
-| `pr_review_claude.yml` | Claude (Anthropic) | Uses Claude Code Action with inline commenting |
+| `pr_review_claude.yml` | Claude (Anthropic) | Uses Claude Code Action with custom prompts |
+| `pr_code_review_claude.yml` | Claude (Anthropic) | Uses `/code-review` plugin with 4 parallel agents |
 | `pr_review_codex.yml` | Codex (OpenAI) | Uses OpenAI Codex Action |
 | `pr_review_kimi.yml` | Kimi (Moonshot AI) | Uses Moonshot API directly |
 
@@ -66,6 +67,55 @@ jobs:
 | Secret | Required | Description |
 |--------|----------|-------------|
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
+
+---
+
+### Claude Code Review (Plugin)
+
+This workflow uses the `/code-review` plugin which launches 4 parallel agents for comprehensive review:
+- **2x CLAUDE.md compliance agents** - Check adherence to repository guidelines
+- **1x Bug detector** - Scans for obvious bugs in changes only
+- **1x History analyzer** - Uses git blame for context-based issues
+
+Issues are scored 0-100 for confidence, and only issues ≥80 are reported (reducing false positives).
+
+```yaml
+name: Claude Code Review (Plugin)
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+jobs:
+  code-review:
+    if: |
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       contains(github.event.comment.body, '/code-review') &&
+       contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+    uses: yetanotherco/actions/.github/workflows/pr_code_review_claude.yml@main
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+**Inputs:**
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `model` | No | `sonnet` | Claude model to use |
+| `max_turns` | No | `30` | Max turns for Claude |
+
+**Secrets:**
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
+
+**Note:** This workflow does not require a `custom_prompt` input. Instead, it reads `CLAUDE.md` files from your repository for review guidelines. Create a `CLAUDE.md` at the root of your repo (or in subdirectories) to define coding standards and review criteria.
 
 ---
 
@@ -185,7 +235,11 @@ jobs:
 All workflows support two trigger methods:
 
 1. **Automatic on PR** - Runs when a PR is opened or marked ready for review
-2. **Manual via comment** - Comment `/claude`, `/codex`, or `/kimi` on a PR to trigger a review
+2. **Manual via comment** - Comment on a PR to trigger a review:
+   - `/claude` - Claude PR Review (custom prompt)
+   - `/code-review` - Claude Code Review Plugin (4 parallel agents)
+   - `/codex` - Codex PR Review
+   - `/kimi` - Kimi PR Review
 
 Only repository owners, members, and collaborators can trigger reviews via comments.
 
