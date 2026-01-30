@@ -26,7 +26,8 @@ on:
 jobs:
   claude-review:
     if: |
-      (github.event_name == 'pull_request') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request &&
        contains(github.event.comment.body, '/claude') &&
@@ -82,7 +83,8 @@ on:
 jobs:
   codex-review:
     if: |
-      (github.event_name == 'pull_request') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request &&
        contains(github.event.comment.body, '/codex') &&
@@ -186,3 +188,20 @@ All workflows support two trigger methods:
 2. **Manual via comment** - Comment `/claude`, `/codex`, or `/kimi` on a PR to trigger a review
 
 Only repository owners, members, and collaborators can trigger reviews via comments.
+
+## Security
+
+### Fork PR Protection
+
+All workflows include built-in protection against fork PR secret exposure. When triggered via `issue_comment` on a fork PR, the workflow will block execution with an error to prevent secrets from being exposed to untrusted code.
+
+**Recommended:** Add fork protection in your consumer workflow's `if` condition for `pull_request` events:
+
+```yaml
+if: |
+  (github.event_name == 'pull_request' &&
+   github.event.pull_request.head.repo.full_name == github.repository) ||
+  ...
+```
+
+This provides defense-in-depth: consumer repos explicitly skip fork PRs, and the shared workflow enforces it as a fail-safe.
