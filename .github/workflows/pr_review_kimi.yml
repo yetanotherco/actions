@@ -37,6 +37,15 @@ jobs:
       pull-requests: write
 
     steps:
+      - name: Block fork PRs
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          HEAD=$(gh api "${{ github.event.issue.pull_request.url }}" --jq '.head.repo.full_name')
+          BASE=$(gh api "${{ github.event.issue.pull_request.url }}" --jq '.base.repo.full_name')
+          [[ "$HEAD" == "$BASE" ]] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -84,7 +93,7 @@ jobs:
           USER_PROMPT="Review this PR diff and provide feedback on any issues found. Be specific about file names and line numbers when possible:"
 
           PAYLOAD=$(jq -n \
-            --arg model "moonshot-v1-128k" \
+            --arg model "kimi-k2.5" \
             --arg system "$SYSTEM_PROMPT" \
             --arg user "$USER_PROMPT" \
             --rawfile diff /tmp/pr_diff_truncated.txt \

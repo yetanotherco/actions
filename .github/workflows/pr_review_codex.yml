@@ -35,6 +35,15 @@ jobs:
       final_message: ${{ steps.codex.outputs.final-message }}
 
     steps:
+      - name: Block fork PRs
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          HEAD=$(gh api "${{ github.event.issue.pull_request.url }}" --jq '.head.repo.full_name')
+          BASE=$(gh api "${{ github.event.issue.pull_request.url }}" --jq '.base.repo.full_name')
+          [[ "$HEAD" == "$BASE" ]] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
+
       - name: Get PR details
         id: pr
         env:
