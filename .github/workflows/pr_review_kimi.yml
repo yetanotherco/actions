@@ -93,7 +93,7 @@ jobs:
           USER_PROMPT="Review this PR diff and provide feedback on any issues found. Be specific about file names and line numbers when possible:"
 
           PAYLOAD=$(jq -n \
-            --arg model "moonshot-v1-128k" \
+            --arg model "kimi-k2.5" \
             --arg system "$SYSTEM_PROMPT" \
             --arg user "$USER_PROMPT" \
             --rawfile diff /tmp/pr_diff_truncated.txt \
