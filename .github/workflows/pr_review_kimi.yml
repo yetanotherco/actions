@@ -103,7 +103,8 @@ jobs:
                 { role: "system", content: $system },
                 { role: "user", content: ($user + "\n\nDiff:\n" + $diff) }
               ],
-              temperature: 0.3,
+              temperature: 1.0,
+              top_p: 0.95,
               max_tokens: 4096
             }')
 
