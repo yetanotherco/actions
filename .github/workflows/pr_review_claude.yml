@@ -53,10 +53,13 @@ jobs:
           BASE=$(gh api "${{ github.event.issue.pull_request.url }}" --jq '.base.repo.full_name')
           [[ "$HEAD" == "$BASE" ]] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
 
-      - name: Checkout repository
+      - name: Checkout the PR head
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          # The default checkout is the default branch on issue_comment events,
+          # which leaves the code under review absent from the working tree.
+          ref: refs/pull/${{ github.event.pull_request.number || github.event.issue.number }}/head
+          fetch-depth: 0
 
       - name: Run Claude Code Review
         id: claude-review
@@ -69,7 +72,7 @@ jobs:
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max_turns }}
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(cargo tree:*),Bash(cargo metadata:*),Bash(npm list:*),Bash(npm ls:*),Bash(forge inspect:*),Read,Glob,Grep"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(cargo tree:*),Bash(cargo metadata:*),Bash(npm list:*),Bash(npm ls:*),Bash(forge inspect:*),Read,Glob,Grep"
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
@@ -78,7 +81,14 @@ jobs:
 
             ${{ inputs.custom_prompt }}
 
-            Note: The PR branch is already checked out in the current working directory.
+            The PR head is checked out in the working directory with full history.
+
+            How to read the PR:
+            Run `gh pr diff <PR NUMBER>` for the diff and read it from the command
+            output; shell redirection, compound commands and `gh api` are all denied,
+            so it cannot be saved to a file. Use Read and Grep on the working tree for
+            surrounding context, and `git log`/`git show` for history. The base branch
+            ref is not fetched, so `git diff` against it will not resolve.
 
             How to comment:
             Use `gh pr comment` for top-level feedback.
