@@ -27,7 +27,9 @@ on:
 jobs:
   codex:
     name: Codex Code Review
-    runs-on: ubuntu-latest
+    # drop-sudo aborts on ubuntu-26.04 (openai/codex-action#188); move back to
+    # ubuntu-latest once a codex-action release fixes it.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       pull-requests: write
