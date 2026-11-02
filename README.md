@@ -232,10 +232,10 @@ jobs:
 
 ## Versioning
 
-The examples use `@main` for brevity. Pin callers to a release's commit SHA instead:
+The examples use `@main` for brevity. Pin callers to the commit SHA of a [release tag](https://github.com/yetanotherco/actions/tags) instead:
 
 ```yaml
-uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@f4afc2c23c48d2d48febc85a9136459e30543a96 # v1.0.4
+uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@<tag commit SHA> # <tag>
 ```
 
 ## Triggering Reviews
