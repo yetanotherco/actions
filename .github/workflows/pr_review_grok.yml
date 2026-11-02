@@ -1,0 +1,106 @@
+name: Grok PR Review
+
+on:
+  workflow_call:
+    inputs:
+      custom_prompt:
+        description: 'Custom review instructions (what to focus on)'
+        required: true
+        type: string
+      model:
+        description: 'xAI model to use'
+        required: false
+        type: string
+        default: 'grok-4.7'
+      reasoning_effort:
+        description: "Reasoning effort: 'low', 'medium', 'high' or 'xhigh'"
+        required: false
+        type: string
+        default: 'medium'
+      max_lines:
+        description: 'Max lines of diff to review (truncates if larger)'
+        required: false
+        type: number
+        default: 10000
+      max_bytes:
+        description: 'Max bytes of diff to review, applied after max_lines (sized to the model context window)'
+        required: false
+        type: number
+        default: 1200000
+    secrets:
+      XAI_API_KEY:
+        required: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+      MODEL: ${{ inputs.model }}
+
+    steps:
+      - name: Block fork PRs
+        run: |
+          [ "$(gh pr view "$PR_NUMBER" --json isCrossRepository --jq .isCrossRepository)" = false ] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
+
+      - name: Get PR diff
+        env:
+          MAX_LINES: ${{ inputs.max_lines }}
+          MAX_BYTES: ${{ inputs.max_bytes }}
+        run: |
+          BASE_SHA=$(gh pr view "$PR_NUMBER" --json baseRefOid --jq .baseRefOid)
+          HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+          MERGE_BASE=$(gh api "repos/$GH_REPO/compare/$BASE_SHA...$HEAD_SHA" --jq .merge_base_commit.sha)
+          git init -q "$RUNNER_TEMP/pr"
+          cd "$RUNNER_TEMP/pr"
+          git remote add origin "$GITHUB_SERVER_URL/$GH_REPO.git"
+          git config credential.helper '!gh auth git-credential'
+          git fetch -q --filter=blob:none --depth=1 origin "$MERGE_BASE" "$HEAD_SHA"
+          git diff "$MERGE_BASE" "$HEAD_SHA" > /tmp/diff.txt
+          LC_ALL=C awk -v l="$MAX_LINES" -v b="$MAX_BYTES" '{ n += length($0) + 1 } NR > l || n > b { exit } 1' /tmp/diff.txt > /tmp/diff_sent.txt
+          [ -s /tmp/diff_sent.txt ] || { echo "The diff to review is empty" | tee /tmp/error.txt; exit 1; }
+          TOTAL=$(wc -l < /tmp/diff.txt) SENT=$(wc -l < /tmp/diff_sent.txt)
+          [ "$SENT" -eq "$TOTAL" ] || printf '> Diff truncated from %d to %d lines. Some changes were not reviewed.\n\n' "$TOTAL" "$SENT" > /tmp/note.md
+
+      - name: Call Grok API
+        env:
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          PROMPT: ${{ inputs.custom_prompt }}
+          EFFORT: ${{ inputs.reasoning_effort }}
+        run: |
+          fail() { echo "$1" | tee /tmp/error.txt; exit 1; }
+          [ -n "$XAI_API_KEY" ] || fail "XAI_API_KEY secret is not set"
+          jq -n --arg model "$MODEL" --arg effort "$EFFORT" --arg prompt "$PROMPT" --rawfile diff /tmp/diff_sent.txt '{
+            model: $model,
+            reasoning: { effort: $effort },
+            max_output_tokens: 16384,
+            store: false,
+            instructions: "You are a code reviewer. Review ONLY the changes in the pull request diff, not the entire codebase.\n\nFocus on:\n\n\($prompt)\n\nIf no issues found, say so briefly.",
+            input: [
+              { role: "user", content: "Review this PR diff and provide feedback on any issues found. Be specific about file names and line numbers when possible:\n\nDiff:\n\($diff)" }
+            ]
+          }' > /tmp/payload.json
+          STATUS=$(curl -sS -o /tmp/response.json -w '%{http_code}' https://api.x.ai/v1/responses \
+            -H "Authorization: Bearer $XAI_API_KEY" -H 'Content-Type: application/json' --data-binary @/tmp/payload.json) || fail "Grok API request failed"
+          [ "$STATUS" = 200 ] || { echo "Response: $(jq -r '.error.message? // .error // empty' /tmp/response.json | tr '\r\n' '  ' | head -c 300)"; fail "Grok API returned HTTP $STATUS"; }
+          FINISH=$(jq -r '.status' /tmp/response.json)
+          [ "$FINISH" = completed ] || fail "Grok did not finish the review (status: $FINISH, reason: $(jq -r '.incomplete_details.reason' /tmp/response.json))"
+          jq -r '[.output[]? | select(.type == "message") | .content[]? | select(.type == "output_text") | .text] | join("\n")' /tmp/response.json > /tmp/review.md
+          [ -n "$(tr -d '[:space:]' < /tmp/review.md)" ] || fail "Grok returned an empty review"
+
+      - name: Post review
+        run: |
+          { printf '## Grok Code Review\n\n'; cat /tmp/note.md 2>/dev/null || true; head -c 60000 /tmp/review.md; printf '\n\n---\n*Automated review by Grok (xAI) · %s*\n' "$MODEL"; } > /tmp/comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md
+
+      - name: Post error
+        if: failure()
+        run: |
+          printf '## Grok Code Review\n\n⚠️ Review failed: %s [Job log](%s)\n' "$(cat /tmp/error.txt 2>/dev/null)" "$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" > /tmp/comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md

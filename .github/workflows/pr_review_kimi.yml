@@ -1,16 +1,3 @@
-# Reusable Kimi Code Review workflow
-# Usage: https://docs.github.com/en/actions/using-workflows/reusing-workflows
-#
-# Example:
-#   jobs:
-#     review:
-#       uses: yetanotherco/actions/.github/workflows/pr_review_kimi.yml@main
-#       with:
-#         custom_prompt: |
-#           1. **Security vulnerabilities** - Label by criticality...
-#       secrets:
-#         KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-
 name: Kimi PR Review
 
 on:
@@ -20,11 +7,26 @@ on:
         description: 'Custom review instructions (what to focus on)'
         required: true
         type: string
+      model:
+        description: 'Kimi model to use'
+        required: false
+        type: string
+        default: 'kimi-k3.1-pro'
+      reasoning_effort:
+        description: "Reasoning effort: 'low', 'high' or 'max'"
+        required: false
+        type: string
+        default: 'high'
       max_lines:
         description: 'Max lines of diff to review (truncates if larger)'
         required: false
         type: number
         default: 10000
+      max_bytes:
+        description: 'Max bytes of diff to review, applied after max_lines (sized to the model context window)'
+        required: false
+        type: number
+        default: 2400000
     secrets:
       KIMI_API_KEY:
         required: true
@@ -32,149 +34,72 @@ on:
 jobs:
   review:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+      MODEL: ${{ inputs.model }}
 
     steps:
       - name: Block fork PRs
-        if: github.event_name == 'issue_comment'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          HEAD=$(gh api "${{ github.event.issue.pull_request.url }}" --jq '.head.repo.full_name')
-          BASE=$(gh api "${{ github.event.issue.pull_request.url }}" --jq '.base.repo.full_name')
-          [[ "$HEAD" == "$BASE" ]] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
-
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
+          [ "$(gh pr view "$PR_NUMBER" --json isCrossRepository --jq .isCrossRepository)" = false ] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
 
       - name: Get PR diff
-        id: diff
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh pr diff ${{ github.event.pull_request.number || github.event.issue.number }} --repo ${{ github.repository }} > /tmp/pr_diff.txt
-
-          TOTAL_LINES=$(wc -l < /tmp/pr_diff.txt)
-          MAX_LINES=${{ inputs.max_lines }}
-
-          head -n $MAX_LINES /tmp/pr_diff.txt > /tmp/pr_diff_truncated.txt
-
-          if [ "$TOTAL_LINES" -gt "$MAX_LINES" ]; then
-            echo "truncated=true" >> "$GITHUB_OUTPUT"
-            echo "total_lines=$TOTAL_LINES" >> "$GITHUB_OUTPUT"
-            echo "::warning::Diff truncated from $TOTAL_LINES to $MAX_LINES lines. Some changes were not reviewed."
-          else
-            echo "truncated=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Call Kimi API for review
-        id: kimi_review
-        run: |
-          echo "::add-mask::${{ secrets.KIMI_API_KEY }}"
-
-          if [ -z "${{ secrets.KIMI_API_KEY }}" ]; then
-            echo "error=true" >> $GITHUB_OUTPUT
-            echo "error_message=KIMI_API_KEY secret is not set" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          SYSTEM_PROMPT="You are a code reviewer. Review ONLY the changes in the pull request diff, not the entire codebase.
-
-          Focus on:
-
-          ${{ inputs.custom_prompt }}
-
-          If no issues found, say so briefly."
-
-          USER_PROMPT="Review this PR diff and provide feedback on any issues found. Be specific about file names and line numbers when possible:"
-
-          PAYLOAD=$(jq -n \
-            --arg model "kimi-k2.5" \
-            --arg system "$SYSTEM_PROMPT" \
-            --arg user "$USER_PROMPT" \
-            --rawfile diff /tmp/pr_diff_truncated.txt \
-            '{
-              model: $model,
-              messages: [
-                { role: "system", content: $system },
-                { role: "user", content: ($user + "\n\nDiff:\n" + $diff) }
-              ],
-              temperature: 1.0,
-              top_p: 0.95,
-              max_tokens: 4096
-            }')
-
-          echo "$PAYLOAD" > /tmp/payload.json
-
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.moonshot.ai/v1/chat/completions" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.KIMI_API_KEY }}" \
-            -d @/tmp/payload.json)
-
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "error=true" >> $GITHUB_OUTPUT
-            echo "error_message=Kimi API request failed with status $HTTP_CODE" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          HAS_ERROR=$(echo "$BODY" | jq -e '.error.message' > /dev/null 2>&1 && echo "yes" || echo "no")
-          if [ "$HAS_ERROR" = "yes" ]; then
-            echo "error=true" >> $GITHUB_OUTPUT
-            echo "error_message=Kimi API returned an error response" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          REVIEW=$(echo "$BODY" | jq -r '.choices[0].message.content // "Error: Unexpected API response"')
-          echo "$REVIEW" > /tmp/review.txt
-          echo "success=true" >> $GITHUB_OUTPUT
-
-      - name: Post review comment
-        if: steps.kimi_review.outputs.success == 'true'
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        env:
-          TRUNCATED: ${{ steps.diff.outputs.truncated }}
-          TOTAL_LINES: ${{ steps.diff.outputs.total_lines }}
           MAX_LINES: ${{ inputs.max_lines }}
-        with:
-          script: |
-            const fs = require('fs');
-            const review = fs.readFileSync('/tmp/review.txt', 'utf8');
-            const truncated = process.env.TRUNCATED === 'true';
-            const totalLines = process.env.TOTAL_LINES;
-            const maxLines = process.env.MAX_LINES;
+          MAX_BYTES: ${{ inputs.max_bytes }}
+        run: |
+          BASE_SHA=$(gh pr view "$PR_NUMBER" --json baseRefOid --jq .baseRefOid)
+          HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+          MERGE_BASE=$(gh api "repos/$GH_REPO/compare/$BASE_SHA...$HEAD_SHA" --jq .merge_base_commit.sha)
+          git init -q "$RUNNER_TEMP/pr"
+          cd "$RUNNER_TEMP/pr"
+          git remote add origin "$GITHUB_SERVER_URL/$GH_REPO.git"
+          git config credential.helper '!gh auth git-credential'
+          git fetch -q --filter=blob:none --depth=1 origin "$MERGE_BASE" "$HEAD_SHA"
+          git diff "$MERGE_BASE" "$HEAD_SHA" > /tmp/diff.txt
+          LC_ALL=C awk -v l="$MAX_LINES" -v b="$MAX_BYTES" '{ n += length($0) + 1 } NR > l || n > b { exit } 1' /tmp/diff.txt > /tmp/diff_sent.txt
+          [ -s /tmp/diff_sent.txt ] || { echo "The diff to review is empty" | tee /tmp/error.txt; exit 1; }
+          TOTAL=$(wc -l < /tmp/diff.txt) SENT=$(wc -l < /tmp/diff_sent.txt)
+          [ "$SENT" -eq "$TOTAL" ] || printf '> Diff truncated from %d to %d lines. Some changes were not reviewed.\n\n' "$TOTAL" "$SENT" > /tmp/note.md
 
-            let truncationWarning = '';
-            if (truncated) {
-              truncationWarning = `\n> Warning: Diff was truncated from ${totalLines} to ${maxLines} lines. Some changes were not reviewed.\n`;
-            }
-
-            if (review && review.trim() !== '') {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.pull_request?.number || context.issue.number,
-                body: `## Kimi Code Review\n${truncationWarning}\n${review}\n\n---\n*Automated review by Kimi (Moonshot AI)*`
-              });
-            }
-
-      - name: Post error comment
-        if: steps.kimi_review.outputs.error == 'true'
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      - name: Call Kimi API
         env:
-          ERROR_MESSAGE: ${{ steps.kimi_review.outputs.error_message }}
-        with:
-          script: |
-            const errorMessage = process.env.ERROR_MESSAGE || 'Unknown error';
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request?.number || context.issue.number,
-              body: `## Kimi Code Review\n\n:warning: Review failed: ${errorMessage}\n\n---\n*Automated review by Kimi (Moonshot AI)*`
-            });
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          PROMPT: ${{ inputs.custom_prompt }}
+          EFFORT: ${{ inputs.reasoning_effort }}
+        run: |
+          fail() { echo "$1" | tee /tmp/error.txt; exit 1; }
+          [ -n "$KIMI_API_KEY" ] || fail "KIMI_API_KEY secret is not set"
+          jq -n --arg model "$MODEL" --arg effort "$EFFORT" --arg prompt "$PROMPT" --rawfile diff /tmp/diff_sent.txt '{
+            model: $model,
+            reasoning_effort: $effort,
+            max_tokens: 65536,
+            messages: [
+              { role: "system", content: "You are a code reviewer. Review ONLY the changes in the pull request diff, not the entire codebase.\n\nFocus on:\n\n\($prompt)\n\nIf no issues found, say so briefly." },
+              { role: "user", content: "Review this PR diff and provide feedback on any issues found. Be specific about file names and line numbers when possible:\n\nDiff:\n\($diff)" }
+            ]
+          }' > /tmp/payload.json
+          STATUS=$(curl -sS -o /tmp/response.json -w '%{http_code}' https://api.moonshot.ai/v1/chat/completions \
+            -H "Authorization: Bearer $KIMI_API_KEY" -H 'Content-Type: application/json' --data-binary @/tmp/payload.json) || fail "Kimi API request failed"
+          [ "$STATUS" = 200 ] || { echo "Response: $(jq -r '.error.message? // .error // empty' /tmp/response.json | tr '\r\n' '  ' | head -c 300)"; fail "Kimi API returned HTTP $STATUS"; }
+          FINISH=$(jq -r '.choices[0].finish_reason' /tmp/response.json)
+          [ "$FINISH" = stop ] || fail "Kimi did not finish the review (finish_reason: $FINISH)"
+          jq -r '.choices[0].message.content // empty' /tmp/response.json > /tmp/review.md
+          [ -n "$(tr -d '[:space:]' < /tmp/review.md)" ] || fail "Kimi returned an empty review"
+
+      - name: Post review
+        run: |
+          { printf '## Kimi Code Review\n\n'; cat /tmp/note.md 2>/dev/null || true; head -c 60000 /tmp/review.md; printf '\n\n---\n*Automated review by Kimi (Moonshot AI) · %s*\n' "$MODEL"; } > /tmp/comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md
+
+      - name: Post error
+        if: failure()
+        run: |
+          printf '## Kimi Code Review\n\n⚠️ Review failed: %s [Job log](%s)\n' "$(cat /tmp/error.txt 2>/dev/null)" "$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" > /tmp/comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md
