@@ -61,7 +61,7 @@ jobs:
             printf '%s\n' "$PROMPT" > /tmp/prompt.md
           elif ! gh api -H 'Accept: application/vnd.github.raw+json' "repos/$GH_REPO/contents/.github/prompts/ai-review.md?ref=$BASE_SHA" > /tmp/prompt.md 2> /tmp/prompt_error.txt; then
             grep -q 'HTTP 404' /tmp/prompt_error.txt || { cat /tmp/prompt_error.txt; exit 1; }
-            ACTIONS_SHA=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq 'first(.referenced_workflows[] | select(.path | startswith("yetanotherco/actions/")) | .sha)')
+            ACTIONS_SHA=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq 'first(.referenced_workflows[] | select(.path | startswith("yetanotherco/actions/.github/workflows/pr_review_codex.yml@")) | .sha)')
             gh api -H 'Accept: application/vnd.github.raw+json' "repos/yetanotherco/actions/contents/.github/prompts/ai-review.md?ref=${ACTIONS_SHA:?}" > /tmp/prompt.md
           fi
           DELIM=$(openssl rand -hex 16)
