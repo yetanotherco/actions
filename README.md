@@ -230,6 +230,14 @@ jobs:
 2. Create a workflow file in `.github/workflows/` using one of the examples above
 3. Customize the `custom_prompt` to match your project's review criteria
 
+## Versioning
+
+The examples use `@main` for brevity. Pin callers to a release's commit SHA instead:
+
+```yaml
+uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@f4afc2c23c48d2d48febc85a9136459e30543a96 # v1.0.4
+```
+
 ## Triggering Reviews
 
 All workflows support two trigger methods:

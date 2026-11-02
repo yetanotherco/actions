@@ -54,7 +54,7 @@ jobs:
           [[ "$HEAD" == "$BASE" ]] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
 
       - name: Checkout the PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The default checkout is the default branch on issue_comment events,
           # which leaves the code under review absent from the working tree.
