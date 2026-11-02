@@ -94,6 +94,7 @@ jobs:
         uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-version: '0.165.0'
           safety-strategy: drop-sudo
           prompt: |
             You are a code reviewer. Review ONLY the changes in this pull request diff, not the entire codebase.
