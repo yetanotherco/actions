@@ -19,24 +19,10 @@ This repository contains reusable GitHub Actions workflows for AI-powered PR cod
 Every workflow except `pr_code_review_claude.yml` takes its review focus from the first of:
 
 1. The `custom_prompt` input, if set
-2. `.github/prompts/ai-review.md`, read from the PR's base branch, so a PR cannot change the prompt that reviews it
-3. A default focus on security, bugs, performance and simplicity
+2. `.github/prompts/ai-review.md` in your repository, read from the PR's base branch, so a PR cannot change the prompt that reviews it
+3. [`.github/prompts/ai-review.md`](.github/prompts/ai-review.md) in this repository, at the commit your workflow pins
 
-Reading the file fails the review on any error other than the file not existing. Example `.github/prompts/ai-review.md`:
-
-```markdown
-1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)
-   - Solidity: e.g. reentrancy, access control, integer issues
-   - Rust: e.g. unsafe blocks, error handling, panics
-   - Web/API: e.g. SQL injection, auth bypass, input validation
-2. **Potential bugs** - Logic errors, edge cases, race conditions
-3. **Performance issues** - Only significant (O(n²), N+1 queries, etc.)
-4. **Simplicity** - Prefer simple, readable code
-
-Guidelines:
-- Be concise and actionable
-- Focus on real issues, not hypothetical improvements
-```
+Reading a prompt file fails the review on any error other than the file not existing. To find the pinned commit, the workflows need `actions: read`; callers that set `permissions:` must grant it.
 
 ## Usage
 
