@@ -56,6 +56,7 @@ jobs:
       - name: Checkout the PR head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # The default checkout is the default branch on issue_comment events,
           # which leaves the code under review absent from the working tree.
           ref: refs/pull/${{ github.event.pull_request.number || github.event.issue.number }}/head
@@ -63,9 +64,7 @@ jobs:
 
       - name: Run Claude Code Review
         id: claude-review
-        # Pinned instead of @v1: v1.0.218+ ships a Claude Code build whose installer
-        # leaves no binary at ~/.local/bin/claude (anthropics/claude-code-action#1817).
-        uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636 # v1.0.217
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           show_full_output: true
