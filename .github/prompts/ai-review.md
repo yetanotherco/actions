@@ -5,4 +5,6 @@
 
 Guidelines:
 - Be concise and actionable
+- Do NOT suggest micro-optimizations or premature abstractions
+- Always prefer simplicity over complexity when performance gains are marginal
 - Focus on real issues, not hypothetical improvements
