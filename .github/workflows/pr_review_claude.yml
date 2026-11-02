@@ -17,9 +17,10 @@ on:
   workflow_call:
     inputs:
       custom_prompt:
-        description: 'Custom review instructions (what to focus on)'
-        required: true
+        description: 'Review focus; overrides .github/prompts/ai-review.md from the base branch'
+        required: false
         type: string
+        default: ''
       model:
         description: 'Claude model to use'
         required: false
@@ -53,6 +54,33 @@ jobs:
           BASE=$(gh api "${{ github.event.issue.pull_request.url }}" --jq '.base.repo.full_name')
           [[ "$HEAD" == "$BASE" ]] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
 
+      - name: Load prompt
+        id: prompt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          PROMPT: ${{ inputs.custom_prompt }}
+        run: |
+          BASE_SHA=$(gh pr view "$PR_NUMBER" --json baseRefOid --jq .baseRefOid)
+          if [ -n "$PROMPT" ]; then
+            printf '%s\n' "$PROMPT" > /tmp/prompt.md
+          elif ! gh api -H 'Accept: application/vnd.github.raw+json' "repos/$GH_REPO/contents/.github/prompts/ai-review.md?ref=$BASE_SHA" > /tmp/prompt.md 2> /tmp/prompt_error.txt; then
+            grep -q 'HTTP 404' /tmp/prompt_error.txt || { cat /tmp/prompt_error.txt; exit 1; }
+            cat > /tmp/prompt.md <<'EOF'
+          1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)
+          2. **Potential bugs** - Logic errors, edge cases, race conditions
+          3. **Performance issues** - Only significant ones
+          4. **Simplicity** - Prefer simple, readable code
+
+          Guidelines:
+          - Be concise and actionable
+          - Focus on real issues, not hypothetical improvements
+          EOF
+          fi
+          DELIM=$(openssl rand -hex 16)
+          { echo "prompt<<$DELIM"; cat /tmp/prompt.md; echo "$DELIM"; } >> "$GITHUB_OUTPUT"
+
       - name: Checkout the PR head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,7 +107,7 @@ jobs:
 
             Please review this pull request with a focus on:
 
-            ${{ inputs.custom_prompt }}
+            ${{ steps.prompt.outputs.prompt }}
 
             The PR head is checked out in the working directory with full history.
 

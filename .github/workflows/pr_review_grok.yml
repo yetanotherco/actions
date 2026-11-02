@@ -4,9 +4,10 @@ on:
   workflow_call:
     inputs:
       custom_prompt:
-        description: 'Custom review instructions (what to focus on)'
-        required: true
+        description: 'Review focus; overrides .github/prompts/ai-review.md from the base branch'
+        required: false
         type: string
+        default: ''
       model:
         description: 'xAI model to use'
         required: false
@@ -49,6 +50,27 @@ jobs:
         run: |
           [ "$(gh pr view "$PR_NUMBER" --json isCrossRepository --jq .isCrossRepository)" = false ] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
 
+      - name: Load prompt
+        env:
+          PROMPT: ${{ inputs.custom_prompt }}
+        run: |
+          BASE_SHA=$(gh pr view "$PR_NUMBER" --json baseRefOid --jq .baseRefOid)
+          if [ -n "$PROMPT" ]; then
+            printf '%s\n' "$PROMPT" > /tmp/prompt.md
+          elif ! gh api -H 'Accept: application/vnd.github.raw+json' "repos/$GH_REPO/contents/.github/prompts/ai-review.md?ref=$BASE_SHA" > /tmp/prompt.md 2> /tmp/prompt_error.txt; then
+            grep -q 'HTTP 404' /tmp/prompt_error.txt || { cat /tmp/prompt_error.txt; exit 1; }
+            cat > /tmp/prompt.md <<'EOF'
+          1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)
+          2. **Potential bugs** - Logic errors, edge cases, race conditions
+          3. **Performance issues** - Only significant ones
+          4. **Simplicity** - Prefer simple, readable code
+
+          Guidelines:
+          - Be concise and actionable
+          - Focus on real issues, not hypothetical improvements
+          EOF
+          fi
+
       - name: Get PR diff
         env:
           MAX_LINES: ${{ inputs.max_lines }}
@@ -71,12 +93,11 @@ jobs:
       - name: Call Grok API
         env:
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
-          PROMPT: ${{ inputs.custom_prompt }}
           EFFORT: ${{ inputs.reasoning_effort }}
         run: |
           fail() { echo "$1" | tee /tmp/error.txt; exit 1; }
           [ -n "$XAI_API_KEY" ] || fail "XAI_API_KEY secret is not set"
-          jq -n --arg model "$MODEL" --arg effort "$EFFORT" --arg prompt "$PROMPT" --rawfile diff /tmp/diff_sent.txt '{
+          jq -n --arg model "$MODEL" --arg effort "$EFFORT" --rawfile prompt /tmp/prompt.md --rawfile diff /tmp/diff_sent.txt '{
             model: $model,
             reasoning: { effort: $effort },
             max_output_tokens: 16384,

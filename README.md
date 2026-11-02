@@ -14,6 +14,30 @@ This repository contains reusable GitHub Actions workflows for AI-powered PR cod
 | `pr_review_grok.yml` | Grok (xAI) | Sends the diff to the xAI Responses API |
 | `pr_review_gemini.yml` | Gemini (Google) | Sends the diff to the Gemini API |
 
+## Review Prompt
+
+Every workflow except `pr_code_review_claude.yml` takes its review focus from the first of:
+
+1. The `custom_prompt` input, if set
+2. `.github/prompts/ai-review.md`, read from the PR's base branch, so a PR cannot change the prompt that reviews it
+3. A default focus on security, bugs, performance and simplicity
+
+Reading the file fails the review on any error other than the file not existing. Example `.github/prompts/ai-review.md`:
+
+```markdown
+1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)
+   - Solidity: e.g. reentrancy, access control, integer issues
+   - Rust: e.g. unsafe blocks, error handling, panics
+   - Web/API: e.g. SQL injection, auth bypass, input validation
+2. **Potential bugs** - Logic errors, edge cases, race conditions
+3. **Performance issues** - Only significant (O(n²), N+1 queries, etc.)
+4. **Simplicity** - Prefer simple, readable code
+
+Guidelines:
+- Be concise and actionable
+- Focus on real issues, not hypothetical improvements
+```
+
 ## Usage
 
 ### Claude PR Review
@@ -37,22 +61,6 @@ jobs:
        contains(github.event.comment.body, '/claude') &&
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@main
-    with:
-      custom_prompt: |
-        1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)
-           - Solidity: e.g. reentrancy, access control, integer issues
-           - Rust: e.g. unsafe blocks, error handling, panics
-           - Web/API: e.g. SQL injection, auth bypass, input validation
-
-        2. **Potential bugs** - Logic errors, edge cases, race conditions
-
-        3. **Performance issues** - Only significant (O(n²), N+1 queries, etc.)
-
-        4. **Simplicity** - Prefer simple, readable code
-
-        Guidelines:
-        - Be concise and actionable
-        - Focus on real issues, not hypothetical improvements
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
@@ -61,7 +69,7 @@ jobs:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `custom_prompt` | Yes | - | Custom review instructions (what to focus on) |
+| `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
 | `model` | No | `sonnet` | Claude model to use |
 | `max_turns` | No | `30` | Max turns for Claude |
 
@@ -118,7 +126,7 @@ jobs:
 |--------|----------|-------------|
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
 
-**Note:** This workflow does not require a `custom_prompt` input. Instead, it reads `CLAUDE.md` files from your repository for review guidelines. Create a `CLAUDE.md` at the root of your repo (or in subdirectories) to define coding standards and review criteria.
+**Note:** This workflow does not use the review prompt. Instead, it reads `CLAUDE.md` files from your repository for review guidelines. Create a `CLAUDE.md` at the root of your repo (or in subdirectories) to define coding standards and review criteria.
 
 ---
 
@@ -143,19 +151,6 @@ jobs:
        contains(github.event.comment.body, '/codex') &&
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     uses: yetanotherco/actions/.github/workflows/pr_review_codex.yml@main
-    with:
-      custom_prompt: |
-        1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)
-
-        2. **Potential bugs** - Logic errors, edge cases, race conditions
-
-        3. **Performance issues** - Only significant issues
-
-        4. **Simplicity** - Prefer simple, readable code
-
-        Guidelines:
-        - Be concise and actionable
-        - Focus on real issues, not hypothetical improvements
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
@@ -164,7 +159,7 @@ jobs:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `custom_prompt` | Yes | - | Custom review instructions (what to focus on) |
+| `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
 
 **Secrets:**
 
@@ -197,19 +192,6 @@ jobs:
        contains(github.event.comment.body, '/kimi') &&
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     uses: yetanotherco/actions/.github/workflows/pr_review_kimi.yml@main
-    with:
-      custom_prompt: |
-        1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)
-
-        2. **Potential bugs** - Logic errors, edge cases, race conditions
-
-        3. **Performance issues** - Only significant issues
-
-        4. **Simplicity** - Prefer simple, readable code
-
-        Guidelines:
-        - Be concise and actionable
-        - Focus on real issues, not hypothetical improvements
     secrets:
       KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
 ```
@@ -225,7 +207,7 @@ jobs:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `custom_prompt` | Yes | - | Custom review instructions (what to focus on) |
+| `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
 | `model` | No | See table | Model to use |
 | `reasoning_effort` | No | See table | Reasoning effort (Gemini: thinking level) |
 | `max_lines` | No | `10000` | Max lines of diff to review (truncates if larger) |
@@ -239,7 +221,7 @@ The diff comes from git, so PRs over the pulls API's 20000-line diff limit still
 
 1. Add the required API key as a secret in your repository settings
 2. Create a workflow file in `.github/workflows/` using one of the examples above
-3. Customize the `custom_prompt` to match your project's review criteria
+3. Put your review focus in `.github/prompts/ai-review.md` (see [Review Prompt](#review-prompt))
 
 ## Versioning
 
