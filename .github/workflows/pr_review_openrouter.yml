@@ -1,4 +1,4 @@
-name: Grok PR Review
+name: OpenRouter PR Review
 
 on:
   workflow_call:
@@ -8,12 +8,11 @@ on:
         required: true
         type: string
       model:
-        description: 'xAI model to use'
-        required: false
+        description: "OpenRouter model ID, e.g. 'deepseek/deepseek-v4-pro', 'x-ai/grok-4.7' or 'google/gemini-4-argon'"
+        required: true
         type: string
-        default: 'grok-4.7'
       reasoning_effort:
-        description: "Reasoning effort: 'low', 'medium', 'high' or 'xhigh'"
+        description: "Reasoning effort: 'none', 'low', 'medium', 'high' or 'xhigh'. OpenRouter maps it to the nearest level the model supports"
         required: false
         type: string
         default: 'medium'
@@ -28,7 +27,7 @@ on:
         type: number
         default: 1200000
     secrets:
-      XAI_API_KEY:
+      OPENROUTER_API_KEY:
         required: true
 
 jobs:
@@ -68,39 +67,47 @@ jobs:
           TOTAL=$(wc -l < /tmp/diff.txt) SENT=$(wc -l < /tmp/diff_sent.txt)
           [ "$SENT" -eq "$TOTAL" ] || printf '> Diff truncated from %d to %d lines. Some changes were not reviewed.\n\n' "$TOTAL" "$SENT" > /tmp/note.md
 
-      - name: Call Grok API
+      - name: Call OpenRouter API
         env:
-          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PROMPT: ${{ inputs.custom_prompt }}
           EFFORT: ${{ inputs.reasoning_effort }}
         run: |
           fail() { echo "$1" | tee /tmp/error.txt; exit 1; }
-          [ -n "$XAI_API_KEY" ] || fail "XAI_API_KEY secret is not set"
+          [ -n "$OPENROUTER_API_KEY" ] || fail "OPENROUTER_API_KEY secret is not set"
+          # data_collection: deny keeps the diff away from providers that may store or train on it.
+          # require_parameters: true skips providers that would ignore the reasoning settings.
           jq -n --arg model "$MODEL" --arg effort "$EFFORT" --arg prompt "$PROMPT" --rawfile diff /tmp/diff_sent.txt '{
             model: $model,
-            reasoning: { effort: $effort },
-            max_output_tokens: 16384,
-            store: false,
-            instructions: "You are a code reviewer. Review ONLY the changes in the pull request diff, not the entire codebase.\n\nFocus on:\n\n\($prompt)\n\nIf no issues found, say so briefly.",
-            input: [
+            reasoning: { effort: $effort, exclude: true },
+            max_tokens: 65536,
+            provider: { data_collection: "deny", require_parameters: true },
+            messages: [
+              { role: "system", content: "You are a code reviewer. Review ONLY the changes in the pull request diff, not the entire codebase.\n\nFocus on:\n\n\($prompt)\n\nIf no issues found, say so briefly." },
               { role: "user", content: "Review this PR diff and provide feedback on any issues found. Be specific about file names and line numbers when possible:\n\nDiff:\n\($diff)" }
             ]
           }' > /tmp/payload.json
-          STATUS=$(curl -sS -o /tmp/response.json -w '%{http_code}' https://api.x.ai/v1/responses \
-            -H "Authorization: Bearer $XAI_API_KEY" -H 'Content-Type: application/json' --data-binary @/tmp/payload.json) || fail "Grok API request failed"
-          [ "$STATUS" = 200 ] || { echo "Response: $(jq -r '.error.message? // .error // empty' /tmp/response.json | tr '\r\n' '  ' | head -c 300)"; fail "Grok API returned HTTP $STATUS"; }
-          FINISH=$(jq -r '.status' /tmp/response.json)
-          [ "$FINISH" = completed ] || fail "Grok did not finish the review (status: $FINISH, reason: $(jq -r '.incomplete_details.reason' /tmp/response.json))"
-          jq -r '[.output[]? | select(.type == "message") | .content[]? | select(.type == "output_text") | .text] | join("\n")' /tmp/response.json > /tmp/review.md
-          [ -n "$(tr -d '[:space:]' < /tmp/review.md)" ] || fail "Grok returned an empty review"
+          STATUS=$(curl -sS -o /tmp/response.json -w '%{http_code}' https://openrouter.ai/api/v1/chat/completions \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY" -H 'Content-Type: application/json' --data-binary @/tmp/payload.json) || fail "OpenRouter API request failed"
+          [ "$STATUS" = 200 ] || { echo "Response: $(jq -r '.error.message? // .error // empty' /tmp/response.json | tr '\r\n' '  ' | head -c 300)"; fail "OpenRouter API returned HTTP $STATUS"; }
+          # OpenRouter can answer 200 with an error body when the provider fails after the request is accepted.
+          if jq -e '.error' /tmp/response.json > /dev/null; then
+            echo "Response: $(jq -r '.error.message? // .error' /tmp/response.json | tr '\r\n' '  ' | head -c 300)"
+            fail "OpenRouter returned an error (code: $(jq -r '.error.code? // "unknown"' /tmp/response.json))"
+          fi
+          echo "Served by: $(jq -r '.provider // "unknown"' /tmp/response.json)"
+          FINISH=$(jq -r '.choices[0].finish_reason' /tmp/response.json)
+          [ "$FINISH" = stop ] || fail "$MODEL did not finish the review (finish_reason: $FINISH)"
+          jq -r '.choices[0].message.content // empty' /tmp/response.json > /tmp/review.md
+          [ -n "$(tr -d '[:space:]' < /tmp/review.md)" ] || fail "$MODEL returned an empty review"
 
       - name: Post review
         run: |
-          { printf '## Grok Code Review\n\n'; cat /tmp/note.md 2>/dev/null || true; head -c 60000 /tmp/review.md; printf '\n\n---\n*Automated review by Grok (xAI) · %s*\n' "$MODEL"; } > /tmp/comment.md
+          { printf '## %s Code Review\n\n' "$MODEL"; cat /tmp/note.md 2>/dev/null || true; head -c 60000 /tmp/review.md; printf '\n\n---\n*Automated review by %s via OpenRouter*\n' "$MODEL"; } > /tmp/comment.md
           gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md
 
       - name: Post error
         if: failure()
         run: |
-          printf '## Grok Code Review\n\n⚠️ Review failed: %s [Job log](%s)\n' "$(cat /tmp/error.txt 2>/dev/null)" "$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" > /tmp/comment.md
+          printf '## %s Code Review\n\n⚠️ Review failed: %s [Job log](%s)\n' "$MODEL" "$(cat /tmp/error.txt 2>/dev/null)" "$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" > /tmp/comment.md
           gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md
