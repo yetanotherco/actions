@@ -1,8 +1,8 @@
 name: AI Code Review
 
-# Reviews this repository's PRs with its own reusable workflows. They are
-# called by local path, so a PR that changes a reviewer is reviewed by its
-# own version of it.
+# Reviews this repository's PRs with its own reusable workflows, called at
+# the `latest` tag so reviews always use the newest released reviewers.
+# Only this repository uses `latest`; other repositories pin a commit SHA.
 
 on:
   pull_request:
@@ -21,7 +21,7 @@ jobs:
       (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
       (startsWith(github.event.comment.body, '/claude') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"'))))
-    uses: ./.github/workflows/pr_review_claude.yml
+    uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@latest
     permissions:
       contents: read
       pull-requests: write
@@ -60,7 +60,7 @@ jobs:
       (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
       (startsWith(github.event.comment.body, '/codex') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"'))))
-    uses: ./.github/workflows/pr_review_codex.yml
+    uses: yetanotherco/actions/.github/workflows/pr_review_codex.yml@latest
     permissions:
       contents: read
       issues: write
@@ -78,7 +78,7 @@ jobs:
       (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
       (startsWith(github.event.comment.body, '/kimi') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"'))))
-    uses: ./.github/workflows/pr_review_kimi.yml
+    uses: yetanotherco/actions/.github/workflows/pr_review_kimi.yml@latest
     permissions:
       contents: read
       pull-requests: write
