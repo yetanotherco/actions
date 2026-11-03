@@ -41,7 +41,6 @@ jobs:
       contents: read
       pull-requests: write
       issues: read
-      id-token: write
 
     steps:
       - name: Block fork PRs
@@ -67,6 +66,10 @@ jobs:
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Claude can read the token the action hands it (origin URL in
+          # .git/config, GH_TOKEN in its env), so use the job-scoped workflow
+          # token instead of the Claude App token, which can write contents.
+          github_token: ${{ github.token }}
           show_full_output: true
           claude_args: |
             --model ${{ inputs.model }}
