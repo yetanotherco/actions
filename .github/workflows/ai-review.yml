@@ -3,10 +3,11 @@ name: AI Code Review
 # Reviews this repository's PRs with its own reusable workflows, called at
 # the `latest` tag so reviews always use the newest released reviewers.
 # Only this repository uses `latest`; other repositories pin a commit SHA.
+#
+# Reviews run only on demand: comment `/review` on a PR to run every
+# reviewer, or `/claude`, `/codex` or `/kimi` to run one.
 
 on:
-  pull_request:
-    types: [opened, reopened, ready_for_review]
   issue_comment:
     types: [created]
 
@@ -15,12 +16,9 @@ permissions: {}
 jobs:
   claude-review:
     if: >
-      (github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login != 'dependabot[bot]') ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+      github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/claude') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"'))))
+      (startsWith(github.event.comment.body, '/claude') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
     uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@latest
     permissions:
       contents: read
@@ -54,12 +52,9 @@ jobs:
 
   codex-review:
     if: >
-      (github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login != 'dependabot[bot]') ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+      github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/codex') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"'))))
+      (startsWith(github.event.comment.body, '/codex') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
     uses: yetanotherco/actions/.github/workflows/pr_review_codex.yml@latest
     permissions:
       contents: read
@@ -72,12 +67,9 @@ jobs:
 
   kimi-review:
     if: >
-      (github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login != 'dependabot[bot]') ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+      github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/kimi') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"'))))
+      (startsWith(github.event.comment.body, '/kimi') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
     uses: yetanotherco/actions/.github/workflows/pr_review_kimi.yml@latest
     permissions:
       contents: read
