@@ -73,10 +73,13 @@ jobs:
 
       - name: Call Kimi API for review
         id: kimi_review
+        env:
+          # Through env, not interpolated into the script: the prompt is free
+          # text, and backticks or quotes in it would run as shell.
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          CUSTOM_PROMPT: ${{ inputs.custom_prompt }}
         run: |
-          echo "::add-mask::${{ secrets.KIMI_API_KEY }}"
-
-          if [ -z "${{ secrets.KIMI_API_KEY }}" ]; then
+          if [ -z "$KIMI_API_KEY" ]; then
             echo "error=true" >> $GITHUB_OUTPUT
             echo "error_message=KIMI_API_KEY secret is not set" >> $GITHUB_OUTPUT
             exit 0
@@ -86,7 +89,7 @@ jobs:
 
           Focus on:
 
-          ${{ inputs.custom_prompt }}
+          ${CUSTOM_PROMPT}
 
           If no issues found, say so briefly."
 
@@ -112,7 +115,7 @@ jobs:
 
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.moonshot.ai/v1/chat/completions" \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.KIMI_API_KEY }}" \
+            -H "Authorization: Bearer $KIMI_API_KEY" \
             -d @/tmp/payload.json)
 
           HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
