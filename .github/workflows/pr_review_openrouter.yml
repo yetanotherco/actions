@@ -1,4 +1,4 @@
-name: DeepSeek PR Review
+name: OpenRouter PR Review
 
 on:
   workflow_call:
@@ -9,15 +9,14 @@ on:
         type: string
         default: ''
       model:
-        description: 'DeepSeek model to use'
-        required: false
+        description: "OpenRouter model ID, e.g. 'deepseek/deepseek-v4-pro', 'x-ai/grok-4.7' or 'google/gemini-4-argon'"
+        required: true
         type: string
-        default: 'deepseek-v4-pro'
       reasoning_effort:
-        description: "Reasoning effort: 'none' (no thinking), 'low', 'high' or 'max'"
+        description: "Reasoning effort: 'none', 'low', 'medium', 'high' or 'xhigh'. OpenRouter maps it to the nearest level the model supports"
         required: false
         type: string
-        default: 'high'
+        default: 'medium'
       max_lines:
         description: 'Max lines of diff to review (truncates if larger)'
         required: false
@@ -27,9 +26,9 @@ on:
         description: 'Max bytes of diff to review, applied after max_lines (sized to the model context window)'
         required: false
         type: number
-        default: 2400000
+        default: 1200000
     secrets:
-      DEEPSEEK_API_KEY:
+      OPENROUTER_API_KEY:
         required: true
 
 jobs:
@@ -49,7 +48,7 @@ jobs:
     steps:
       - name: Block fork PRs
         run: |
-          [ "$(gh pr view "$PR_NUMBER" --json isCrossRepository --jq .isCrossRepository)" = false ] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
+          [ "$(gh pr view "$PR_NUMBER" --json isCrossRepository --jq .isCrossRepository)" = false ] || { echo "::error::Fork PR blocked to protect secrets"; echo "Fork PRs are blocked to protect secrets." > /tmp/error.txt; exit 1; }
 
       - name: Load prompt
         env:
@@ -60,7 +59,7 @@ jobs:
             printf '%s\n' "$PROMPT" > /tmp/prompt.md
           elif ! gh api -H 'Accept: application/vnd.github.raw+json' "repos/$GH_REPO/contents/.github/prompts/ai-review.md?ref=$BASE_SHA" > /tmp/prompt.md 2> /tmp/prompt_error.txt; then
             grep -q 'HTTP 404' /tmp/prompt_error.txt || { cat /tmp/prompt_error.txt; exit 1; }
-            ACTIONS_SHA=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq 'first(.referenced_workflows[] | select(.path | startswith("yetanotherco/actions/.github/workflows/pr_review_deepseek.yml@")) | .sha)')
+            ACTIONS_SHA=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq 'first(.referenced_workflows[] | select(.path | startswith("yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@")) | .sha)')
             gh api -H 'Accept: application/vnd.github.raw+json' "repos/yetanotherco/actions/contents/.github/prompts/ai-review.md?ref=${ACTIONS_SHA:?}" > /tmp/prompt.md
           fi
 
@@ -83,37 +82,50 @@ jobs:
           TOTAL=$(wc -l < /tmp/diff.txt) SENT=$(wc -l < /tmp/diff_sent.txt)
           [ "$SENT" -eq "$TOTAL" ] || printf '> Diff truncated from %d to %d lines. Some changes were not reviewed.\n\n' "$TOTAL" "$SENT" > /tmp/note.md
 
-      - name: Call DeepSeek API
+      - name: Call OpenRouter API
         env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           EFFORT: ${{ inputs.reasoning_effort }}
         run: |
           fail() { echo "$1" | tee /tmp/error.txt; exit 1; }
-          [ -n "$DEEPSEEK_API_KEY" ] || fail "DEEPSEEK_API_KEY secret is not set"
+          [ -n "$OPENROUTER_API_KEY" ] || fail "OPENROUTER_API_KEY secret is not set"
+          # data_collection: deny keeps the diff away from providers that may store or train on it.
+          # require_parameters: true skips providers that would ignore the reasoning settings.
           jq -n --arg model "$MODEL" --arg effort "$EFFORT" --rawfile prompt /tmp/prompt.md --rawfile diff /tmp/diff_sent.txt '{
             model: $model,
-            reasoning_effort: $effort,
+            reasoning: { effort: $effort, exclude: true },
             max_tokens: 65536,
+            provider: { data_collection: "deny", require_parameters: true },
             messages: [
               { role: "system", content: "You are a code reviewer. Review ONLY the changes in the pull request diff, not the entire codebase.\n\nFocus on:\n\n\($prompt)\n\nIf no issues found, say so briefly." },
               { role: "user", content: "Review this PR diff and provide feedback on any issues found. Be specific about file names and line numbers when possible:\n\nDiff:\n\($diff)" }
             ]
           }' > /tmp/payload.json
-          STATUS=$(curl -sS -o /tmp/response.json -w '%{http_code}' https://api.deepseek.com/chat/completions \
-            -H "Authorization: Bearer $DEEPSEEK_API_KEY" -H 'Content-Type: application/json' --data-binary @/tmp/payload.json) || fail "DeepSeek API request failed"
-          [ "$STATUS" = 200 ] || { echo "Response: $(jq -r '.error.message? // .error // empty' /tmp/response.json | tr '\r\n' '  ' | head -c 300)"; fail "DeepSeek API returned HTTP $STATUS"; }
+          STATUS=$(curl -sS -o /tmp/response.json -w '%{http_code}' https://openrouter.ai/api/v1/chat/completions \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY" -H 'Content-Type: application/json' --data-binary @/tmp/payload.json) || fail "OpenRouter API request failed"
+          [ "$STATUS" = 200 ] || { echo "Response: $(jq -r '.error.message? // .error // empty' /tmp/response.json | tr '\r\n' '  ' | head -c 300)"; fail "OpenRouter API returned HTTP $STATUS"; }
+          # OpenRouter can answer 200 with an error body when the provider fails after the request is accepted.
+          if jq -e '.error' /tmp/response.json > /dev/null; then
+            echo "Response: $(jq -r '.error.message? // .error' /tmp/response.json | tr '\r\n' '  ' | head -c 300)"
+            fail "OpenRouter returned an error (code: $(jq -r '.error.code? // "unknown"' /tmp/response.json))"
+          fi
+          echo "Served by: $(jq -r '.provider // "unknown"' /tmp/response.json)"
           FINISH=$(jq -r '.choices[0].finish_reason' /tmp/response.json)
-          [ "$FINISH" = stop ] || fail "DeepSeek did not finish the review (finish_reason: $FINISH)"
+          [ "$FINISH" = stop ] || fail "$MODEL did not finish the review (finish_reason: $FINISH)"
           jq -r '.choices[0].message.content // empty' /tmp/response.json > /tmp/review.md
-          [ -n "$(tr -d '[:space:]' < /tmp/review.md)" ] || fail "DeepSeek returned an empty review"
+          [ -n "$(tr -d '[:space:]' < /tmp/review.md)" ] || fail "$MODEL returned an empty review"
 
       - name: Post review
         run: |
-          { printf '## DeepSeek Code Review\n\n'; cat /tmp/note.md 2>/dev/null || true; head -c 60000 /tmp/review.md; printf '\n\n---\n*Automated review by DeepSeek · %s*\n' "$MODEL"; } > /tmp/comment.md
+          if [ "$(wc -c < /tmp/review.md)" -gt 60000 ]; then
+            printf '> Review truncated to 60000 bytes. The full review is in the job log.\n\n' >> /tmp/note.md
+            echo '::group::Full review'; cat /tmp/review.md; echo '::endgroup::'
+          fi
+          { printf '## %s Code Review\n\n' "$MODEL"; cat /tmp/note.md 2>/dev/null || true; head -c 60000 /tmp/review.md; printf '\n\n---\n*Automated review by %s via OpenRouter*\n' "$MODEL"; } > /tmp/comment.md
           gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md
 
       - name: Post error
         if: failure()
         run: |
-          printf '## DeepSeek Code Review\n\n⚠️ Review failed: %s [Job log](%s)\n' "$(cat /tmp/error.txt 2>/dev/null)" "$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" > /tmp/comment.md
+          printf '## %s Code Review\n\n⚠️ Review failed: %s [Job log](%s)\n' "$MODEL" "$(cat /tmp/error.txt 2>/dev/null || echo 'An unexpected step failed.')" "$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" > /tmp/comment.md
           gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md

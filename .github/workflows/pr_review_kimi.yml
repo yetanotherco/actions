@@ -49,7 +49,7 @@ jobs:
     steps:
       - name: Block fork PRs
         run: |
-          [ "$(gh pr view "$PR_NUMBER" --json isCrossRepository --jq .isCrossRepository)" = false ] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
+          [ "$(gh pr view "$PR_NUMBER" --json isCrossRepository --jq .isCrossRepository)" = false ] || { echo "::error::Fork PR blocked to protect secrets"; echo "Fork PRs are blocked to protect secrets." > /tmp/error.txt; exit 1; }
 
       - name: Load prompt
         env:
@@ -109,11 +109,15 @@ jobs:
 
       - name: Post review
         run: |
+          if [ "$(wc -c < /tmp/review.md)" -gt 60000 ]; then
+            printf '> Review truncated to 60000 bytes. The full review is in the job log.\n\n' >> /tmp/note.md
+            echo '::group::Full review'; cat /tmp/review.md; echo '::endgroup::'
+          fi
           { printf '## Kimi Code Review\n\n'; cat /tmp/note.md 2>/dev/null || true; head -c 60000 /tmp/review.md; printf '\n\n---\n*Automated review by Kimi (Moonshot AI) · %s*\n' "$MODEL"; } > /tmp/comment.md
           gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md
 
       - name: Post error
         if: failure()
         run: |
-          printf '## Kimi Code Review\n\n⚠️ Review failed: %s [Job log](%s)\n' "$(cat /tmp/error.txt 2>/dev/null)" "$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" > /tmp/comment.md
+          printf '## Kimi Code Review\n\n⚠️ Review failed: %s [Job log](%s)\n' "$(cat /tmp/error.txt 2>/dev/null || echo 'An unexpected step failed.')" "$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" > /tmp/comment.md
           gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md

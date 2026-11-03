@@ -7,16 +7,13 @@ This repository contains reusable GitHub Actions workflows for AI-powered PR cod
 | Workflow | AI Model | Description |
 |----------|----------|-------------|
 | `pr_review_claude.yml` | Claude (Anthropic) | Uses Claude Code Action with custom prompts |
-| `pr_code_review_claude.yml` | Claude (Anthropic) | Uses `/code-review` plugin with 4 parallel agents |
 | `pr_review_codex.yml` | Codex (OpenAI) | Uses OpenAI Codex Action |
 | `pr_review_kimi.yml` | Kimi (Moonshot AI) | Sends the diff to the Moonshot API |
-| `pr_review_deepseek.yml` | DeepSeek | Sends the diff to the DeepSeek API |
-| `pr_review_grok.yml` | Grok (xAI) | Sends the diff to the xAI Responses API |
-| `pr_review_gemini.yml` | Gemini (Google) | Sends the diff to the Gemini API |
+| `pr_review_openrouter.yml` | Any OpenRouter model (DeepSeek, Grok, Gemini, ...) | Sends the diff to the OpenRouter API |
 
 ## Review Prompt
 
-Every workflow except `pr_code_review_claude.yml` takes its review focus from the first of:
+Every workflow takes its review focus from the first of:
 
 1. The `custom_prompt` input, if set
 2. `.github/prompts/ai-review.md` in your repository, read from the PR's base branch, so a PR cannot change the prompt that reviews it
@@ -67,55 +64,6 @@ jobs:
 
 ---
 
-### Claude Code Review (Plugin)
-
-This workflow uses the `/code-review` plugin which launches 4 parallel agents for comprehensive review:
-- **2x CLAUDE.md compliance agents** - Check adherence to repository guidelines
-- **1x Bug detector** - Scans for obvious bugs in changes only
-- **1x History analyzer** - Uses git blame for context-based issues
-
-Issues are scored 0-100 for confidence, and only issues ≥80 are reported (reducing false positives).
-
-```yaml
-name: Claude Code Review (Plugin)
-
-on:
-  pull_request:
-    types: [opened, ready_for_review]
-  issue_comment:
-    types: [created]
-
-jobs:
-  code-review:
-    if: |
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request &&
-       contains(github.event.comment.body, '/code-review') &&
-       contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
-    uses: yetanotherco/actions/.github/workflows/pr_code_review_claude.yml@main
-    secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-```
-
-**Inputs:**
-
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `model` | No | `sonnet` | Claude model to use |
-| `max_turns` | No | `30` | Max turns for Claude |
-
-**Secrets:**
-
-| Secret | Required | Description |
-|--------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
-
-**Note:** This workflow does not use the review prompt. Instead, it reads `CLAUDE.md` files from your repository for review guidelines. Create a `CLAUDE.md` at the root of your repo (or in subdirectories) to define coding standards and review criteria.
-
----
-
 ### Codex PR Review
 
 ```yaml
@@ -155,9 +103,9 @@ jobs:
 
 ---
 
-### Kimi, DeepSeek, Grok and Gemini PR Reviews
+### Kimi PR Review
 
-These workflows send the PR diff to the provider's API and post the answer as a PR comment. They share one interface; the example uses Kimi.
+Sends the PR diff to the Moonshot API and posts the answer as a PR comment.
 
 ```yaml
 name: Kimi Code Review
@@ -182,22 +130,80 @@ jobs:
       KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
 ```
 
-| Workflow | Secret | Command | `model` | `reasoning_effort` | `max_bytes` |
-|----------|--------|---------|---------|--------------------|-------------|
-| `pr_review_kimi.yml` | `KIMI_API_KEY` | `/kimi` | `kimi-k3.1-pro` | `high` (`low`, `high`, `max`) | `2400000` |
-| `pr_review_deepseek.yml` | `DEEPSEEK_API_KEY` | `/deepseek` | `deepseek-v4-pro` | `high` (`none`, `low`, `high`, `max`) | `2400000` |
-| `pr_review_grok.yml` | `XAI_API_KEY` | `/grok` | `grok-4.7` | `medium` (`low`, `medium`, `high`, `xhigh`) | `1200000` |
-| `pr_review_gemini.yml` | `GEMINI_API_KEY` | `/gemini` | `gemini-4-argon` | `medium` (`low`, `medium`, `high`) | `2400000` |
+**Inputs:**
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
+| `model` | No | `kimi-k3.1-pro` | Model to use |
+| `reasoning_effort` | No | `high` | Reasoning effort: `low`, `high` or `max` |
+| `max_lines` | No | `10000` | Max lines of diff to review (truncates if larger) |
+| `max_bytes` | No | `2400000` | Max bytes of diff to review, applied after `max_lines` |
+
+**Secrets:**
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `KIMI_API_KEY` | Yes | Moonshot API key |
+
+---
+
+### OpenRouter PR Reviews (DeepSeek, Grok, Gemini)
+
+Sends the PR diff to any [OpenRouter](https://openrouter.ai/models) model and posts the answer as a PR comment. One `OPENROUTER_API_KEY` covers every model: add one job per model, with the values from the table below. The example uses DeepSeek.
+
+```yaml
+name: DeepSeek Code Review
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+jobs:
+  deepseek-review:
+    if: |
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       contains(github.event.comment.body, '/deepseek') &&
+       contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+    uses: yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@main
+    with:
+      model: deepseek/deepseek-v4-pro
+      reasoning_effort: high
+      max_bytes: 2400000
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+```
+
+| Model | Command | `reasoning_effort` | `max_bytes` |
+|-------|---------|--------------------|-------------|
+| `deepseek/deepseek-v4-pro` | `/deepseek` | `high` (`none`, `high`, `xhigh`) | `2400000` (1M context) |
+| `x-ai/grok-4.7` | `/grok` | `medium` (`low`, `medium`, `high`, `xhigh`) | `1200000` (500K context) |
+| `google/gemini-4-argon` | `/gemini` | `medium` (`low`, `medium`, `high`) | `2400000` (1M context) |
 
 **Inputs:**
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
-| `model` | No | See table | Model to use |
-| `reasoning_effort` | No | See table | Reasoning effort (Gemini: thinking level) |
+| `model` | Yes | - | OpenRouter model ID (see table) |
+| `reasoning_effort` | No | `medium` | Reasoning effort. OpenRouter maps it to the nearest level the model supports |
 | `max_lines` | No | `10000` | Max lines of diff to review (truncates if larger) |
-| `max_bytes` | No | See table | Max bytes of diff to review, applied after `max_lines` |
+| `max_bytes` | No | `1200000` | Max bytes of diff to review, applied after `max_lines`. Raise it for 1M-context models |
+
+**Secrets:**
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `OPENROUTER_API_KEY` | Yes | OpenRouter API key |
+
+Requests set `provider.data_collection: deny`, so OpenRouter only routes the diff to providers that don't store or train on it, and `provider.require_parameters: true`, so it skips providers that would ignore the reasoning settings. DeepSeek isn't served by DeepSeek itself on OpenRouter, only by third-party hosts; the job log shows which provider served each review.
+
+### Kimi and OpenRouter notes
 
 The diff comes from git, so PRs over the pulls API's 20000-line diff limit still get reviewed. A truncated diff is flagged in the review comment. A failed API call or a response that stops early posts an error comment and fails the job.
 
@@ -224,12 +230,9 @@ All workflows support two trigger methods:
 1. **Automatic on PR** - Runs when a PR is opened or marked ready for review
 2. **Manual via comment** - Comment on a PR to trigger a review:
    - `/claude` - Claude PR Review (custom prompt)
-   - `/code-review` - Claude Code Review Plugin (4 parallel agents)
    - `/codex` - Codex PR Review
    - `/kimi` - Kimi PR Review
-   - `/deepseek` - DeepSeek PR Review
-   - `/grok` - Grok PR Review
-   - `/gemini` - Gemini PR Review
+   - `/deepseek`, `/grok`, `/gemini` - OpenRouter PR Review, with the commands from the OpenRouter table
 
 Only repository owners, members, and collaborators can trigger reviews via comments.
 

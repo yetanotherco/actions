@@ -82,12 +82,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/pull/${{ steps.pr.outputs.number }}/merge
+          # Codex can read any file on disk, so keep the token out of the
+          # credentials file checkout would leave under $RUNNER_TEMP.
+          persist-credentials: false
 
       - name: Pre-fetch base and head refs for the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
-          git fetch --no-tags origin \
-            ${{ steps.pr.outputs.base_ref }} \
-            +refs/pull/${{ steps.pr.outputs.number }}/head
+          # Pass the token to this fetch only; nothing is written to disk.
+          AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$AUTH"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" \
+            fetch --no-tags origin "$BASE_REF" "+refs/pull/$PR_NUMBER/head"
 
       - name: Run Codex Code Review
         id: codex
