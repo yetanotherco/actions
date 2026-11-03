@@ -1,0 +1,88 @@
+name: AI Code Review
+
+# Reviews this repository's PRs with its own reusable workflows. They are
+# called by local path, so a PR that changes a reviewer is reviewed by its
+# own version of it.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  claude-review:
+    if: >
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+      (startsWith(github.event.comment.body, '/claude') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"'))))
+    uses: ./.github/workflows/pr_review_claude.yml
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    with:
+      custom_prompt: &review_prompt |
+        This repository holds reusable GitHub Actions workflows that other repositories call to get AI reviews of their pull requests (`.github/workflows/pr_review_*.yml`), plus the README that documents how to call them. Each workflow runs a model (Claude through claude-code-action, Codex through codex-action, Kimi through its API) on a PR diff and posts the result as a PR comment.
+
+        Review ONLY the changes in this pull request diff. Focus on:
+
+        1. **Secrets and tokens**: the reviewer models read attacker-influenced text (the diff, PR comments), so treat them as untrusted. Flag any change that lets a model read or echo an API key or a GitHub token: tokens persisted to disk (`persist-credentials`), tokens in the model's environment or in `.git/config`, tools that can read arbitrary files or post arbitrary content, or model output posted somewhere it could leak.
+        2. **Script injection**: workflow expressions interpolated directly into `run:` scripts or `github-script` code where the value comes from PR titles, branch names, comments, API responses or model output. Those values must reach the script through `env`.
+        3. **Permissions and triggers**: least-privilege `permissions` per job, fork PRs blocked before any secret is used, comment triggers restricted by author association, no `pull_request_target` or `workflow_run` running PR code with secrets.
+        4. **Supply chain**: every external action pinned to a full commit SHA with a version comment, CLIs installed at pinned versions.
+        5. **Caller compatibility**: these are `workflow_call` workflows used by other repositories. Flag removed or renamed inputs and secrets, changed defaults, new required permissions the caller must grant, and README examples or input tables that no longer match the workflow.
+        6. **Correctness**: shell quoting, unhandled failures (a review that fails silently instead of failing the job or posting an error), multiline values written to `$GITHUB_OUTPUT`, diff truncation, and PR numbers resolved correctly for both `pull_request` and `issue_comment` events.
+
+        Guidelines:
+        - Be concise and actionable. Reference file names and line numbers.
+        - Only flag real issues, not style.
+        - Label security findings by criticality (Critical/High/Medium/Low).
+        - If the PR looks good, say so briefly.
+
+        Formatting rules:
+        - Never write `#N` for enumeration; GitHub renders it as an issue reference. Use `1.`, `2.` or bullets.
+        - When referring back to items, write "Item 1", never "Issue #1".
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  codex-review:
+    if: >
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+      (startsWith(github.event.comment.body, '/codex') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"'))))
+    uses: ./.github/workflows/pr_review_codex.yml
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    with:
+      custom_prompt: *review_prompt
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+  kimi-review:
+    if: >
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+      (startsWith(github.event.comment.body, '/kimi') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"'))))
+    uses: ./.github/workflows/pr_review_kimi.yml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      custom_prompt: *review_prompt
+    secrets:
+      KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
