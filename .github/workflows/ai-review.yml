@@ -5,7 +5,8 @@ name: AI Code Review
 # Only this repository uses `latest`; other repositories pin a commit SHA.
 #
 # Reviews run only on demand: comment `/review` on a PR to run every
-# reviewer, or `/claude`, `/codex` or `/kimi` to run one.
+# reviewer, or `/claude`, `/codex`, `/kimi`, `/deepseek`, `/grok` or `/gemini`
+# to run one.
 
 on:
   issue_comment:
@@ -27,7 +28,7 @@ jobs:
       id-token: write
     with:
       custom_prompt: &review_prompt |
-        This repository holds reusable GitHub Actions workflows that other repositories call to get AI reviews of their pull requests (`.github/workflows/pr_review_*.yml`), plus the README that documents how to call them. Each workflow runs a model (Claude through claude-code-action, Codex through codex-action, Kimi through its API) on a PR diff and posts the result as a PR comment.
+        This repository holds reusable GitHub Actions workflows that other repositories call to get AI reviews of their pull requests (`.github/workflows/pr_review_*.yml`), plus the README that documents how to call them. Each workflow runs a model (Claude through claude-code-action, Codex through codex-action, Kimi through the Moonshot API, and DeepSeek, Grok and Gemini through the OpenRouter API) on a PR diff and posts the result as a PR comment.
 
         Review ONLY the changes in this pull request diff. Focus on:
 
@@ -78,3 +79,51 @@ jobs:
       custom_prompt: *review_prompt
     secrets:
       KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+
+  deepseek-review:
+    if: >
+      github.event.issue.pull_request &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+      (startsWith(github.event.comment.body, '/deepseek') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
+    uses: yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@latest
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      model: deepseek/deepseek-v4-pro
+      reasoning_effort: high
+      max_bytes: 2400000
+      custom_prompt: *review_prompt
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+  grok-review:
+    if: >
+      github.event.issue.pull_request &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+      (startsWith(github.event.comment.body, '/grok') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
+    uses: yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@latest
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      model: x-ai/grok-4.7
+      custom_prompt: *review_prompt
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+  gemini-review:
+    if: >
+      github.event.issue.pull_request &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+      (startsWith(github.event.comment.body, '/gemini') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
+    uses: yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@latest
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      model: google/gemini-4-argon
+      max_bytes: 2400000
+      custom_prompt: *review_prompt
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
