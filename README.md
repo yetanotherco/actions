@@ -53,7 +53,7 @@ jobs:
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
-| `model` | No | `sonnet` | Claude model to use |
+| `model` | No | `claude-opus-5-5` | Claude model to use |
 | `max_turns` | No | `30` | Max turns for Claude |
 
 **Secrets:**
@@ -94,6 +94,7 @@ jobs:
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
+| `model` | No | `gpt-6.1-sol` | Codex model to use |
 
 **Secrets:**
 
@@ -172,7 +173,7 @@ jobs:
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     uses: yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@main
     with:
-      model: deepseek/deepseek-v4-pro
+      model: deepseek/deepseek-v4-pro-0813
       reasoning_effort: high
       max_bytes: 2400000
     secrets:
@@ -181,7 +182,7 @@ jobs:
 
 | Model | Command | `reasoning_effort` | `max_bytes` |
 |-------|---------|--------------------|-------------|
-| `deepseek/deepseek-v4-pro` | `/deepseek` | `high` (`none`, `high`, `xhigh`) | `2400000` (1M context) |
+| `deepseek/deepseek-v4-pro-0813` | `/deepseek` | `high` (`max`, `high`, `low`, `none`) | `2400000` (1M context) |
 | `x-ai/grok-4.7` | `/grok` | `medium` (`low`, `medium`, `high`, `xhigh`) | `1200000` (500K context) |
 | `google/gemini-4-argon` | `/gemini` | `medium` (`low`, `medium`, `high`) | `2400000` (1M context) |
 
@@ -201,7 +202,7 @@ jobs:
 |--------|----------|-------------|
 | `OPENROUTER_API_KEY` | Yes | OpenRouter API key |
 
-Requests set `provider.data_collection: deny`, so OpenRouter only routes the diff to providers that don't store or train on it, and `provider.require_parameters: true`, so it skips providers that would ignore the reasoning settings. DeepSeek isn't served by DeepSeek itself on OpenRouter, only by third-party hosts; the job log shows which provider served each review.
+Requests set `provider.data_collection: deny`, so OpenRouter only routes the diff to providers that don't store or train on it, and `provider.require_parameters: true`, so it skips providers that would ignore the reasoning settings. The job log shows which provider served each review.
 
 ### Kimi and OpenRouter notes
 
