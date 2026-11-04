@@ -9,11 +9,11 @@ on:
         type: string
         default: ''
       model:
-        description: "OpenRouter model ID, e.g. 'deepseek/deepseek-v4-pro', 'x-ai/grok-4.7' or 'google/gemini-4-argon'"
+        description: "OpenRouter model ID, e.g. 'moonshotai/kimi-k3.1-pro', 'deepseek/deepseek-v4-pro', 'x-ai/grok-4.7' or 'google/gemini-4-argon'"
         required: true
         type: string
       reasoning_effort:
-        description: "Reasoning effort: 'none', 'low', 'medium', 'high' or 'xhigh'. OpenRouter maps it to the nearest level the model supports"
+        description: "Reasoning effort: 'none', 'low', 'medium', 'high', 'xhigh' or 'max'. OpenRouter maps it to the nearest level the model supports"
         required: false
         type: string
         default: 'medium'
