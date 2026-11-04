@@ -36,7 +36,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      actions: read
       contents: read
       pull-requests: write
     env:
@@ -53,14 +52,15 @@ jobs:
       - name: Load prompt
         env:
           PROMPT: ${{ inputs.custom_prompt }}
+          ACTIONS_REPO: ${{ job.workflow_repository }}
+          ACTIONS_SHA: ${{ job.workflow_sha }}
         run: |
           BASE_SHA=$(gh pr view "$PR_NUMBER" --json baseRefOid --jq .baseRefOid)
           if [ -n "$PROMPT" ]; then
             printf '%s\n' "$PROMPT" > /tmp/prompt.md
           elif ! gh api -H 'Accept: application/vnd.github.raw+json' "repos/$GH_REPO/contents/.github/prompts/ai-review.md?ref=$BASE_SHA" > /tmp/prompt.md 2> /tmp/prompt_error.txt; then
             grep -q 'HTTP 404' /tmp/prompt_error.txt || { cat /tmp/prompt_error.txt; exit 1; }
-            ACTIONS_SHA=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq 'first(.referenced_workflows[] | select(.path | startswith("yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@")) | .sha)')
-            gh api -H 'Accept: application/vnd.github.raw+json' "repos/yetanotherco/actions/contents/.github/prompts/ai-review.md?ref=${ACTIONS_SHA:?}" > /tmp/prompt.md
+            gh api -H 'Accept: application/vnd.github.raw+json' "repos/${ACTIONS_REPO:?}/contents/.github/prompts/ai-review.md?ref=${ACTIONS_SHA:?}" > /tmp/prompt.md
           fi
 
       - name: Get PR diff

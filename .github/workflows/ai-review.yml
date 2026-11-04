@@ -21,7 +21,6 @@ jobs:
       (startsWith(github.event.comment.body, '/claude') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
     uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@latest
     permissions:
-      actions: read
       contents: read
       pull-requests: write
       issues: read
@@ -58,7 +57,6 @@ jobs:
       (startsWith(github.event.comment.body, '/codex') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
     uses: yetanotherco/actions/.github/workflows/pr_review_codex.yml@latest
     permissions:
-      actions: read
       contents: read
       issues: write
       pull-requests: write
@@ -74,7 +72,6 @@ jobs:
       (startsWith(github.event.comment.body, '/kimi') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
     uses: yetanotherco/actions/.github/workflows/pr_review_kimi.yml@latest
     permissions:
-      actions: read
       contents: read
       pull-requests: write
     with:

@@ -19,7 +19,7 @@ Every workflow takes its review focus from the first of:
 2. `.github/prompts/ai-review.md` in your repository, read from the PR's base branch, so a PR cannot change the prompt that reviews it
 3. [`.github/prompts/ai-review.md`](.github/prompts/ai-review.md) in this repository, at the commit your workflow pins
 
-Reading a prompt file fails the review on any error other than the file not existing. To find the pinned commit, the workflows need `actions: read`; callers that set `permissions:` must grant it.
+Reading a prompt file fails the review on any error other than the file not existing.
 
 ## Usage
 
