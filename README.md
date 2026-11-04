@@ -235,6 +235,8 @@ All workflows support two trigger methods:
    - `/kimi` - Kimi PR Review
    - `/deepseek`, `/grok`, `/gemini` - OpenRouter PR Review, with the commands from the OpenRouter table
 
+In this repository, `/review` runs every reviewer at once (see `.github/workflows/ai-review.yml`).
+
 Only repository owners, members, and collaborators can trigger reviews via comments.
 
 ## Security
