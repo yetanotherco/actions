@@ -4,9 +4,10 @@ on:
   workflow_call:
     inputs:
       custom_prompt:
-        description: 'Custom review instructions (what to focus on)'
-        required: true
+        description: 'Review focus; overrides .github/prompts/ai-review.md from the base branch'
+        required: false
         type: string
+        default: ''
       model:
         description: 'Kimi model to use'
         required: false
@@ -49,6 +50,20 @@ jobs:
         run: |
           [ "$(gh pr view "$PR_NUMBER" --json isCrossRepository --jq .isCrossRepository)" = false ] || { echo "::error::Fork PR blocked to protect secrets"; echo "Fork PRs are blocked to protect secrets." > /tmp/error.txt; exit 1; }
 
+      - name: Load prompt
+        env:
+          PROMPT: ${{ inputs.custom_prompt }}
+          ACTIONS_REPO: ${{ job.workflow_repository }}
+          ACTIONS_SHA: ${{ job.workflow_sha }}
+        run: |
+          BASE_SHA=$(gh pr view "$PR_NUMBER" --json baseRefOid --jq .baseRefOid)
+          if [ -n "$PROMPT" ]; then
+            printf '%s\n' "$PROMPT" > /tmp/prompt.md
+          elif ! gh api -H 'Accept: application/vnd.github.raw+json' "repos/$GH_REPO/contents/.github/prompts/ai-review.md?ref=$BASE_SHA" > /tmp/prompt.md 2> /tmp/prompt_error.txt; then
+            grep -q 'HTTP 404' /tmp/prompt_error.txt || { cat /tmp/prompt_error.txt; exit 1; }
+            gh api -H 'Accept: application/vnd.github.raw+json' "repos/${ACTIONS_REPO:?}/contents/.github/prompts/ai-review.md?ref=${ACTIONS_SHA:?}" > /tmp/prompt.md
+          fi
+
       - name: Get PR diff
         env:
           MAX_LINES: ${{ inputs.max_lines }}
@@ -71,12 +86,11 @@ jobs:
       - name: Call Kimi API
         env:
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-          PROMPT: ${{ inputs.custom_prompt }}
           EFFORT: ${{ inputs.reasoning_effort }}
         run: |
           fail() { echo "$1" | tee /tmp/error.txt; exit 1; }
           [ -n "$KIMI_API_KEY" ] || fail "KIMI_API_KEY secret is not set"
-          jq -n --arg model "$MODEL" --arg effort "$EFFORT" --arg prompt "$PROMPT" --rawfile diff /tmp/diff_sent.txt '{
+          jq -n --arg model "$MODEL" --arg effort "$EFFORT" --rawfile prompt /tmp/prompt.md --rawfile diff /tmp/diff_sent.txt '{
             model: $model,
             reasoning_effort: $effort,
             max_tokens: 65536,

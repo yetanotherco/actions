@@ -11,6 +11,16 @@ This repository contains reusable GitHub Actions workflows for AI-powered PR cod
 | `pr_review_kimi.yml` | Kimi (Moonshot AI) | Sends the diff to the Moonshot API |
 | `pr_review_openrouter.yml` | Any OpenRouter model (DeepSeek, Grok, Gemini, ...) | Sends the diff to the OpenRouter API |
 
+## Review Prompt
+
+Every workflow takes its review focus from the first of:
+
+1. The `custom_prompt` input, if set
+2. `.github/prompts/ai-review.md` in your repository, read from the PR's base branch, so a PR cannot change the prompt that reviews it
+3. [`.github/prompts/ai-review.md`](.github/prompts/ai-review.md) in this repository, at the commit your workflow pins
+
+Reading a prompt file fails the review on any error other than the file not existing.
+
 ## Usage
 
 ### Claude PR Review
@@ -34,22 +44,6 @@ jobs:
        contains(github.event.comment.body, '/claude') &&
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@main
-    with:
-      custom_prompt: |
-        1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)
-           - Solidity: e.g. reentrancy, access control, integer issues
-           - Rust: e.g. unsafe blocks, error handling, panics
-           - Web/API: e.g. SQL injection, auth bypass, input validation
-
-        2. **Potential bugs** - Logic errors, edge cases, race conditions
-
-        3. **Performance issues** - Only significant (O(n²), N+1 queries, etc.)
-
-        4. **Simplicity** - Prefer simple, readable code
-
-        Guidelines:
-        - Be concise and actionable
-        - Focus on real issues, not hypothetical improvements
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
@@ -58,7 +52,7 @@ jobs:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `custom_prompt` | Yes | - | Custom review instructions (what to focus on) |
+| `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
 | `model` | No | `sonnet` | Claude model to use |
 | `max_turns` | No | `30` | Max turns for Claude |
 
@@ -91,19 +85,6 @@ jobs:
        contains(github.event.comment.body, '/codex') &&
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     uses: yetanotherco/actions/.github/workflows/pr_review_codex.yml@main
-    with:
-      custom_prompt: |
-        1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)
-
-        2. **Potential bugs** - Logic errors, edge cases, race conditions
-
-        3. **Performance issues** - Only significant issues
-
-        4. **Simplicity** - Prefer simple, readable code
-
-        Guidelines:
-        - Be concise and actionable
-        - Focus on real issues, not hypothetical improvements
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
@@ -112,7 +93,7 @@ jobs:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `custom_prompt` | Yes | - | Custom review instructions (what to focus on) |
+| `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
 
 **Secrets:**
 
@@ -145,19 +126,6 @@ jobs:
        contains(github.event.comment.body, '/kimi') &&
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     uses: yetanotherco/actions/.github/workflows/pr_review_kimi.yml@main
-    with:
-      custom_prompt: |
-        1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)
-
-        2. **Potential bugs** - Logic errors, edge cases, race conditions
-
-        3. **Performance issues** - Only significant issues
-
-        4. **Simplicity** - Prefer simple, readable code
-
-        Guidelines:
-        - Be concise and actionable
-        - Focus on real issues, not hypothetical improvements
     secrets:
       KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
 ```
@@ -166,7 +134,7 @@ jobs:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `custom_prompt` | Yes | - | Custom review instructions (what to focus on) |
+| `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
 | `model` | No | `kimi-k3.1-pro` | Model to use |
 | `reasoning_effort` | No | `high` | Reasoning effort: `low`, `high` or `max` |
 | `max_lines` | No | `10000` | Max lines of diff to review (truncates if larger) |
@@ -207,18 +175,6 @@ jobs:
       model: deepseek/deepseek-v4-pro
       reasoning_effort: high
       max_bytes: 2400000
-      custom_prompt: |
-        1. **Security vulnerabilities** - Label by criticality (Critical/High/Medium/Low)
-
-        2. **Potential bugs** - Logic errors, edge cases, race conditions
-
-        3. **Performance issues** - Only significant issues
-
-        4. **Simplicity** - Prefer simple, readable code
-
-        Guidelines:
-        - Be concise and actionable
-        - Focus on real issues, not hypothetical improvements
     secrets:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
@@ -233,7 +189,7 @@ jobs:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `custom_prompt` | Yes | - | Custom review instructions (what to focus on) |
+| `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
 | `model` | Yes | - | OpenRouter model ID (see table) |
 | `reasoning_effort` | No | `medium` | Reasoning effort. OpenRouter maps it to the nearest level the model supports |
 | `max_lines` | No | `10000` | Max lines of diff to review (truncates if larger) |
@@ -257,7 +213,7 @@ The diff comes from git, so PRs over the pulls API's 20000-line diff limit still
 
 1. Add the required API key as a secret in your repository settings
 2. Create a workflow file in `.github/workflows/` using one of the examples above
-3. Customize the `custom_prompt` to match your project's review criteria
+3. Put your review focus in `.github/prompts/ai-review.md` (see [Review Prompt](#review-prompt))
 
 ## Versioning
 
