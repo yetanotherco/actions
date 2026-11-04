@@ -90,7 +90,7 @@ jobs:
       contents: read
       pull-requests: write
     with:
-      model: deepseek/deepseek-v4-pro
+      model: deepseek/deepseek-v4-pro-0813
       reasoning_effort: high
       max_bytes: 2400000
       custom_prompt: *review_prompt
