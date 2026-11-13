@@ -215,9 +215,9 @@ The diff comes from git, so PRs over the pulls API's 20000-line diff limit still
 
 `pr_review_multi.yml` runs a security review with several models and posts **one** comment.
 
-1. **Reviewers.** Opus 5.5 (effort xhigh), GPT 6.1 Sol, Kimi K3.1, GLM 5.3 and DeepSeek V4 Pro review the PR in parallel. Each is an agent (Claude Code or Codex) in a read-only sandbox with no network, so it reads callers, checks and types outside the diff. A soft budget ends each reviewer at about 50 commands or 30 minutes.
+1. **Reviewers.** Opus 5.5 (effort xhigh), GPT 6.1 Sol, Kimi K3.1, GLM 5.3 and DeepSeek V4 Pro review the PR in parallel. Each is an agent (Claude Code or Codex) in a read-only sandbox with no network, so it reads callers, checks and types outside the diff. A soft budget asks each reviewer to finish: after 80 commands (120 for GPT and GLM), about $1.50–2.50 of estimated spend, or 30 minutes, whichever comes first (the command and spend limits double for priority parts of a split PR).
 2. **Housekeeping.** A cheap model (DeepSeek V4 Flash) lists stale docs, missing tests, leftovers and inconsistencies, separately from the security review.
-3. **Merge and judge.** Duplicate findings are merged. A judge (GPT 6.1 Sol) checks every finding against the code, sees every reviewer's claim, and marks each one a bug, suspected, pre-existing, or likely not a problem.
+3. **Merge and judge.** Duplicate findings are merged. A judge (GPT 6.1 Sol) checks the findings against the code, sees every reviewer's claim, and marks each one a bug, suspected, pre-existing, or likely not a problem. The comment says how many it checked; findings it did not reach (more than 20, or over the budget) are marked *unverified*.
 4. **Comment.** It opens with a table of findings to check (severity, status, which models found it, where). Below that come collapsed sections: details, duplicates, pre-existing bugs, findings the judge dismissed (with its reason), and housekeeping. A last line gives what the review cost.
 
 ```yaml
@@ -267,6 +267,7 @@ The workflow also accepts `pull_request` events, for example a `labeled` trigger
 | `lanes` | No | `''` | Reviewer models, comma-separated: `claude`, `gpt`, `kimi`, `glm`, `deepseek`, `gemini`, `grok`, `fable`. Empty = the first five |
 | `config_dir` | No | `.github/ai-review` | Directory with `config.toml` and `threat_model.md` in your repository |
 | `housekeeping` | No | `true` | Run the housekeeping reviewer |
+| `sandbox_check` | No | `strict` | Check the reviewers' sandbox before any paid call: `strict` stops the review if it fails, `warn` only logs it, `off` skips it ([details](#sandbox-check)) |
 
 **Secrets:**
 
@@ -279,13 +280,17 @@ The calling job must grant `contents: read`, `pull-requests: write` and `actions
 
 #### Repository config
 
-Put a `config.toml` and a `threat_model.md` in `.github/ai-review/` in your repository. Both are read from the PR's base branch, so a PR cannot change how it is reviewed. Without them every file counts as security-sensitive, which is safe but costs more on large PRs.
+Put a `config.toml` and a `threat_model.md` in `.github/ai-review/` in your repository. Both are read from the PR's base branch, so a PR's own changes to them do not apply to its review. (Callers that also trigger on `pull_request` events run the PR's version of their own workflow file, which can change the inputs.) `threat_model` must be a file name in the same directory. Without a config every file counts as security-sensitive, which is safe but costs more on large PRs.
 
 ```toml
 threat_model = "threat_model.md"   # what matters in this repository; goes into every reviewer prompt
 
-# Files that get every reviewer. Others (docs, tests, tooling) get `nonsensitive_lanes` only.
+# Security-sensitive files. With default_sensitive = true (the default) every file not matched by
+# low_risk is sensitive too, so `sensitive` only orders the review; with false, unmatched files are
+# not sensitive. In a split PR, parts with no sensitive file get only `nonsensitive_lanes`.
 sensitive = ["crates/core/**", "contracts/src/**", "Cargo.toml"]
+default_sensitive = true
+low_risk = ["docs/**", "scripts/**", "examples/**"]
 nonsensitive_lanes = ["claude", "gpt", "kimi"]
 
 # Not reviewed at all (lockfiles, binaries and generated or vendored code are skipped already).
@@ -294,8 +299,9 @@ ignore = ["benches/**", "**/*.json"]
 # Extra test file patterns, on top of tests/, *_test.rs, *.test.ts, ...
 test_globs = ["fixtures/**"]
 
-# Review order for large PRs. Parts matching these come first and, in a split PR, get twice the
-# per-reviewer budget.
+# Review order for large PRs: sensitive parts first, ordered by this list, then parts matching
+# `sensitive`, then the rest. Parts matching these also get twice the per-reviewer budget in a split
+# PR, so keep the list short.
 priority = ["contracts/src/**", "crates/core/**"]
 
 # Large PRs are split into parts by Cargo package, else by the first `unit_depth` path components.
@@ -306,10 +312,14 @@ unit_depth = 2
 
 #### Cost and large PRs
 
-- **Typical cost:** about $3 for a PR reviewed in one part, at API prices. Opus is about 60% of it. The comment's last line shows the cost of each review. In CI this figure is computed from token counts and published prices. The OpenRouter bill is exact, but a key shared by several repositories can't attribute it to one review.
-- **Budget:** a PR over about 4,000 changed lines is split into parts of about 2,500 lines. The parts are reviewed in order (`priority`, then `sensitive`, then the rest) until the PR budget runs out, keeping enough for the judge (at least 15% of a split PR's budget). Parts left unreviewed are listed at the top of the comment; `/review continue` reviews them with a new budget.
-- **Hard limits:** each reviewer stops at its soft budget, and it is killed at its lane cap ($3–4, estimated). A watchdog stops the whole review at the PR budget. The ceiling OpenRouter enforces is the key's credit limit.
-- **Time:** a one-part PR takes 15–35 minutes. The parts of a split PR run one after another, so a PR with many parts can approach the job's 330-minute limit.
+- **Typical cost:** about $3 for a PR reviewed in one part, at API prices; Opus is about 40% of it. The comment's last line shows the cost of each review. In CI this figure is computed from token counts and published prices. The OpenRouter bill is exact, but a key shared by several repositories can't attribute it to one review.
+- **Budget:** a PR over about 4,000 *effective* lines (changed code, with whitespace-only changes and long deletions compacted, plus half the test lines; docs, lockfiles and generated files do not count) is split into parts of about 2,500 lines, up to about 4,000 for one area. The parts are reviewed in the order above until the PR budget runs out, keeping enough for the judge (at least 15% of a split PR's budget). Parts left unreviewed are listed at the top of the comment; `/review continue` reviews them with a new budget.
+- **Hard limits:** each reviewer is killed at its lane cap ($3–4 estimated, doubled for priority parts). A watchdog stops the whole review at the PR budget, counting this review's own computed spend (other reviews may share the key). The ceilings the providers enforce are the OpenRouter key's credit limit, for every model but Opus, and the Anthropic workspace's spend limit, for Opus.
+- **Time:** a one-part PR takes 15–35 minutes. The parts of a split PR run one after another; no new part starts after 240 minutes, so the review and its comment finish inside the job's 330-minute limit, and `continue` picks up the rest.
+
+#### Sandbox check
+
+Before any paid call the runner runs one command in the reviewers' sandbox, with no model, and checks that it works and that it cannot read other processes' environments, where the API keys are. With `sandbox_check: strict` (the default) a failed check stops the review and the comment says why; `warn` only logs it.
 
 #### Provider presets
 

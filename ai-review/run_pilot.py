@@ -301,6 +301,7 @@ def base_env() -> dict[str, str]:
     return env
 
 
+RUN_T0 = time.time()   # process start: --deadline-min counts from here
 ANTHROPIC_API_PREFIX = "apikey:"   # marks an Anthropic API key passed where a subscription token goes
 
 
@@ -319,6 +320,8 @@ def read_key() -> str:
     if env_key:
         _EXACT_SECRETS.append(env_key)
         return env_key
+    if not shutil.which("security"):
+        sys.exit("OPENROUTER_API_KEY is not set (and there is no macOS Keychain to read it from)")
     r = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_ITEM, "-w"],
                        capture_output=True, text=True)
     key = r.stdout.strip()
@@ -960,6 +963,10 @@ def normalize_findings(obj: Any) -> tuple[list[dict], list[str], str]:
 # ---------------------------------------------------------------------------------------
 # Repo config, checkout
 
+REPO_CONFIG_KEYS = {"sensitive", "ignore", "test_globs", "unit_depth", "nonsensitive_lanes", "low_risk",
+                    "default_sensitive", "threat_model", "source", "priority"}
+
+
 def load_repo_config(owner: str, name: str, path: str | None = None) -> dict:
     """Repo config: `path` (--repo-config; CI reads it from the reviewed repository's base branch, so a
     PR cannot change how it is reviewed) or repos/<owner>_<name>.toml. A relative `threat_model` is
@@ -971,7 +978,16 @@ def load_repo_config(owner: str, name: str, path: str | None = None) -> dict:
         p = Path(path).resolve()
         cfg["threat_model"] = "threat_model.md"
         cfg.update(tomllib.loads(p.read_text()))
-        cfg["threat_model"] = str((p.parent / cfg["threat_model"]).resolve())
+        # only a file next to the config (the workflow downloads that directory's files): no other path,
+        # so a config cannot pull e.g. /proc/self/environ into every prompt
+        tm = str(cfg.get("threat_model") or "threat_model.md")
+        if "/" in tm or "\\" in tm or tm.startswith("."):
+            log(f"WARNING: threat_model = {tm!r} in {p.name} is not a file name next to it: using threat_model.md")
+            tm = "threat_model.md"
+        cfg["threat_model"] = str(p.parent / tm)
+        unknown = sorted(set(cfg) - REPO_CONFIG_KEYS)
+        if unknown:
+            log(f"WARNING: unknown keys in {p.name} (ignored): {', '.join(unknown)}")
         cfg["source"] = str(p)
         return cfg
     for ext in ("toml", "json"):
@@ -1263,14 +1279,50 @@ def write_zsh_gate(zdotdir: Path, flag: Path) -> None:
 # checkout and its gate folder back as more specific "read" entries. Checked with `codex sandbox`
 # on 2026-11-11: denied paths answer "Operation not permitted". Extra entries (other checkouts of
 # the repository under review, e.g. cargo git checkouts) are added per run in main().
-LANE_READ_DENY = ["~/workspace", "~/.cache/ai-review", "~/.ssh", "~/.aws", "~/.config", "~/.claude", "~/.codex",
+LANE_READ_DENY = ["~/workspace", "~/.ssh", "~/.aws", "~/.config", "~/.claude", "~/.codex",
                   "~/.gnupg", "~/Library/Keychains", "~/.netrc", "~/.docker", "~/.kube", "~/.cargo/credentials.toml"]
 LANE_READ_DENY_EXTRA: list[str] = []
+SCRATCH_DENY_ROOT = "~/.cache/ai-review"   # clones and other runs' checkouts: denied entry by entry
+
+
+def scratch_denies(read_roots: list[Path]) -> list[str]:
+    """Every entry under the scratch dir except the path down to the lane's own checkout. Denying the
+    whole dir and allowing the checkout inside it broke git in every Codex lane: git resolves the work
+    tree's parent directories, the sandbox refused them, and lanes spent up to ~11 commands working
+    around it (trace of lambda_vm #353, 2026-11-13). Entries created after the lane starts are not
+    covered; they are other runs' checkouts of public code at other commits."""
+    root = Path(os.path.expanduser(SCRATCH_DENY_ROOT))
+    keep = [r.resolve() for r in read_roots]
+    out: list[str] = []
+
+    def walk(d: Path) -> None:
+        for e in sorted(d.iterdir()):
+            er = e.resolve()
+            if not any(k == er or str(k).startswith(str(er) + "/") for k in keep):
+                out.append(str(e))
+            elif not any(k == er for k in keep):
+                walk(e)   # a parent of a kept path: deny its other entries
+    if root.is_dir():
+        walk(root)
+    return out
+
+
+def env_denies() -> list[str]:
+    """Extra read-denied paths from AI_REVIEW_DENY (colon-separated; CI: the runner temp dir with the
+    earlier review and the config, the workspace with the runner, the Actions runner's own directory)."""
+    return [d for d in os.environ.get("AI_REVIEW_DENY", "").split(":") if d]
+
+
+def existing(paths: list[str]) -> list[str]:
+    """Only paths that exist: bubblewrap cannot mask a missing path (Claude Code issue #39284), and a
+    deny for a path that does not exist protects nothing."""
+    return [d for d in dict.fromkeys(paths) if os.path.lexists(os.path.expanduser(d))]
 
 
 def permissions_toml(read_roots: list[Path]) -> str:
     home = os.path.expanduser("~")
-    deny = [d.replace("~", home, 1) for d in LANE_READ_DENY] + LANE_READ_DENY_EXTRA
+    deny = existing([d.replace("~", home, 1) for d in LANE_READ_DENY] + LANE_READ_DENY_EXTRA
+                    + scratch_denies(read_roots) + env_denies())
     lines = ['default_permissions = "review"', "", "[permissions.review]", 'extends = ":read-only"', "",
              "[permissions.review.filesystem]"]
     lines += [f"{json.dumps(d)} = \"deny\"" for d in deny]
@@ -1288,7 +1340,9 @@ def codex_home_for(dirpath: Path, model: str, prices: dict, zdotdir: Path | None
         # "Model metadata ... not found" warning may still appear; it is recorded.
         meta = f"model_context_window = {ctx}\nmodel_auto_compact_token_limit = {int(ctx * 0.8)}\n"
     # json.dumps gives a valid TOML basic string for a path
-    shell_set = f"set = {{ ZDOTDIR = {json.dumps(str(zdotdir))} }}\n" if zdotdir else ""
+    # XDG_CONFIG_HOME: git otherwise warns on every command that ~/.config/git/ignore is denied
+    shell_set = (f"set = {{ ZDOTDIR = {json.dumps(str(zdotdir))}, XDG_CONFIG_HOME = {json.dumps(str(zdotdir))} }}\n"
+                 if zdotdir else "")
     (dirpath / "config.toml").write_text(f"""# Isolated Codex config for one review lane (generated)
 model_provider = "openrouter"
 approval_policy = "never"
@@ -1351,11 +1405,13 @@ def save_codex_trace(home: Path, dest: Path) -> None:
                 continue
             if e.get("type") != "response_item":
                 continue
-            p = e.get("payload") or {}
+            p = e.get("payload")
+            if not isinstance(p, dict):
+                continue
             t = p.get("type")
             if t == "reasoning":
-                txt = "\n".join(c.get("text", "") for c in (p.get("content") or []) if isinstance(c, dict))
-                txt = txt or "\n".join(c.get("text", "") for c in (p.get("summary") or []) if isinstance(c, dict))
+                txt = "\n".join(str(c.get("text") or "") for c in (p.get("content") or []) if isinstance(c, dict))
+                txt = txt or "\n".join(str(c.get("text") or "") for c in (p.get("summary") or []) if isinstance(c, dict))
                 if txt:
                     rows.append({"kind": "reasoning", "text": txt})
             elif t in ("function_call", "custom_tool_call", "local_shell_call"):
@@ -1366,11 +1422,14 @@ def save_codex_trace(home: Path, dest: Path) -> None:
                 out = out if isinstance(out, str) else json.dumps(out)
                 rows.append({"kind": "output", "chars": len(out), "text": out[:300]})
             elif t == "message" and p.get("role") == "assistant":
-                txt = "\n".join(c.get("text", "") for c in (p.get("content") or []) if isinstance(c, dict))
+                txt = "\n".join(str(c.get("text") or "") for c in (p.get("content") or []) if isinstance(c, dict))
                 if txt:
                     rows.append({"kind": "message", "text": txt})
     if rows:
-        write_text(dest, "".join(json.dumps(r) + "\n" for r in rows))
+        for r in rows:   # bounded: the trace goes into the CI artifact
+            if isinstance(r.get("text"), str) and len(r["text"]) > 20_000:
+                r["text"] = r["text"][:20_000] + " [truncated]"
+        write_text(dest, "".join(json.dumps(r) + "\n" for r in rows[:5000]))
     shutil.rmtree(home / "sessions", ignore_errors=True)
 
 
@@ -1408,7 +1467,10 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
     rc, wall, timed_out, killed = _popen_with_timeout(cmd, wt, env, prompt, out_dir / "events.jsonl",
                                                       out_dir / "stderr.txt", timeout, tail, label)
     del env
-    save_codex_trace(home, out_dir / "trace.jsonl")
+    try:
+        save_codex_trace(home, out_dir / "trace.jsonl")
+    except Exception as e:  # noqa: BLE001 - a trace problem must not cost a finished, paid lane
+        log(f"{label}: trace extraction failed ({type(e).__name__}: {e})")
     res: dict[str, Any] = {"lane": name, "harness": "codex", "model": model, "model_sent": sent_model,
                            "wall_s": round(wall, 1), "exit_code": rc, "timed_out": timed_out,
                            "schema_enforced": enforced, "lane_cap": lane_cap,
@@ -1483,7 +1545,7 @@ def claude_settings(wt: Path) -> dict:
     # overridden by an allow, so the cache dir's other entries are listed one by one (Fable review,
     # 2026-11-12: Claude lanes could read reports/ and scoring/).
     sensitive.append(f"{home}/workspace")
-    sensitive += [d.replace(os.path.expanduser("~"), home, 1) for d in LANE_READ_DENY_EXTRA]
+    sensitive += [d.replace(os.path.expanduser("~"), home, 1) for d in LANE_READ_DENY_EXTRA + env_denies()]
     wt_abs = wt.resolve()
     for root in {wt_abs.parent.parent, wt_abs.parent}:   # e.g. ~/.cache/ai-review and .../isolated
         if not str(root).startswith(os.path.expanduser("~/.cache")):
@@ -1491,12 +1553,14 @@ def claude_settings(wt: Path) -> dict:
         for d in sorted(root.iterdir()):
             if d.resolve() not in (wt_abs, wt_abs.parent) and not str(wt_abs).startswith(str(d.resolve()) + "/"):
                 sensitive.append(str(d).replace(os.path.expanduser("~"), home, 1))
+    sensitive = existing(sensitive)   # bubblewrap fails on a denyRead path that does not exist
     return {
         "permissions": {
             "defaultMode": "dontAsk",
             "allow": ["Read", "Grep", "Glob", "Bash"],
-            "deny": ["Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Agent"]
-                    + [f"Read({p}/**)" for p in sensitive],
+            # rule paths: `~/x` home, `//x` absolute (a single `/x` would be relative to the settings file)
+            "deny": ["Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Agent", "Read(//proc/**)"]
+                    + [f"Read({'/' + p if p.startswith('/') else p}/**)" for p in sensitive],
         },
         "sandbox": {
             "enabled": True,
@@ -1519,6 +1583,7 @@ class ClaudeTail:
     SOFT_REFUSALS_BEFORE_KILL refusals (the hook appends one line per refusal to `refused`)."""
 
     def __init__(self, path: Path, model: str, prices: dict, soft: dict, flag: Path, refused: Path, label: str = ""):
+        self.count_inflight = False   # run_claude sets it for API-billed lanes
         self.path, self.model, self.prices, self.soft, self.flag, self.refused = path, model, prices, soft, flag, refused
         self.label, self.offset, self.buf, self.t0 = label, 0, "", time.time()
         self.tools, self.usage, self.gate = 0, {}, None
@@ -1557,6 +1622,9 @@ class ClaudeTail:
 
     def __call__(self) -> str | None:
         self.read()
+        if self.label and getattr(self, "count_inflight", False):
+            with GUARD.lock:
+                GUARD.inflight[self.label] = self.cost()
         if self.gate is None:
             el, est = time.time() - self.t0, self.cost()
             note = budget_note(self.soft, self.tools, est, el)
@@ -1624,6 +1692,9 @@ def run_claude(name: str, model: str, sent_model: str, small_model: str, prompt:
         settings.pop("disableAllHooks", None)
         settings["hooks"] = hooks
         gate_tail = ClaudeTail(out_dir / "events.jsonl", model, prices, soft, flag, refused, label)
+        # API-billed lanes report their running cost to the spend gate and watchdog, like Codex lanes;
+        # subscription lanes are not spend (see Biller.spent)
+        gate_tail.count_inflight = not (auth_token and not auth_token.startswith(ANTHROPIC_API_PREFIX))
     write_json(settings_path, settings)
     env = base_env()
     if auth_token:
@@ -1739,8 +1810,12 @@ def run_claude(name: str, model: str, sent_model: str, small_model: str, prompt:
     else:
         res["final_text"] = ""
     stderr = (out_dir / "stderr.txt").read_text(errors="replace")
-    res.update({"usage": usage, "computed_cost": cost if result else None, "warnings": warnings,
-                "errors": errors})
+    if not result and gate_tail is not None and gate_tail.usage:
+        # killed or timed out before its result event: count what its messages already cost (ESTIMATE)
+        cost = gate_tail.cost()
+        warnings.append(f"no result event: computed cost ${cost:.2f} ESTIMATED from per-message usage")
+    res.update({"usage": usage, "computed_cost": cost if (result or (gate_tail is not None and gate_tail.usage)) else None,
+                "warnings": warnings, "errors": errors})
     if gate_tail is not None:
         res["soft_budget"] = soft
         if gate_tail.gate:
@@ -1751,7 +1826,8 @@ def run_claude(name: str, model: str, sent_model: str, small_model: str, prompt:
     if killed:
         killed_result(res, killed)
         if not result:
-            res["warnings"].append("killed before Claude Code reported usage: computed cost unknown (see billed)")
+            if res.get("computed_cost") is None:
+                res["warnings"].append("killed before Claude Code reported usage: computed cost unknown (see billed)")
     elif timed_out:
         res["status"], res["error"] = "failed", f"timeout after {timeout}s"
     elif rc != 0 or not result or result.get("is_error"):
@@ -2426,7 +2502,9 @@ class Biller:
         if not lease.used:
             row["billed"], row["billed_source"] = 0.0, (
                 "not billed on OpenRouter: Claude subscription (computed = API-equivalent at OpenRouter prices)"
-                if row.get("auth") == "subscription" else "no paid call")
+                if row.get("auth") == "subscription" else
+                "billed by Anthropic, not OpenRouter (computed = tokens x published prices)"
+                if row.get("auth") == "anthropic" else "no paid call")
         elif self.isolation == "keys":
             row["billed"], row["billed_source"] = None, "child key (settling)"
             if lease.hash:
@@ -2436,6 +2514,8 @@ class Biller:
             row["billed"] = _delta(cur, self.last)
             row["billed_source"] = "main key delta around this job (sequential)"
             self.last = cur
+        elif self.isolation == "shared":
+            row["billed"], row["billed_source"] = None, "shared key: not attributable to one run (cost = computed)"
         else:
             row["billed"], row["billed_source"] = None, "per phase only (--isolate mode)"
         if job.result_path and job.result_path.parent.exists() and self.isolation != "keys":
@@ -2497,6 +2577,10 @@ class Biller:
         # estimates are 0: counting their API-equivalent here made the gate inconsistent (a private 24-part PR
         # batch 3: unit 4 ran on an estimate without Opus, then the judge's reserve was gone).
         computed = sum(r.get("computed_cost") or 0 for r in rows if r.get("auth") != "subscription") + inflight
+        if self.isolation == "shared":
+            # the key's usage also moves with other reviews that share it: gate on this run's own
+            # computed spend (OpenRouter and Anthropic lanes, running ones included)
+            return computed
         billed = 0.0
         try:
             main = max(_delta(key_status(self.key), self.before) or 0.0, 0.0)
@@ -2662,7 +2746,24 @@ def cached_share(u: dict) -> str:
 
 
 def _cell(s: str, n: int = 300) -> str:
-    return str(s)[:n].replace("|", "\\|").replace("\n", " ")
+    return _md_text(str(s)[:n]).replace("|", "\\|").replace("\n", " ")
+
+
+def _md_text(s: str) -> str:
+    """Model-written text for the public PR comment: no HTML (tags, comments that hide the rest of the
+    comment), no @mentions, no images or links, no blank lines. Every `<`/`>` is neutralized, also
+    inside what looks like a code span (a span can be faked or ended early): outside spans as HTML
+    entities, inside as look-alike brackets, which GitHub shows as they are (`Vec‹u8›`)."""
+    s = re.sub(r"\s*\n\s*", " ", str(s))   # one paragraph: a blank line would end a code span
+    parts = s.replace("\\`", "'").split("`")
+    if len(parts) % 2 == 0:   # an unmatched backtick: the tail is plain text
+        parts[-2:] = [parts[-2] + "'" + parts[-1]]
+    for k in range(len(parts)):
+        t = parts[k]
+        t = t.replace("<", "‹").replace(">", "›") if k % 2 else t.replace("<", "&lt;").replace(">", "&gt;")
+        t = re.sub(r"@(?=[A-Za-z0-9])", "@\u200b", t)          # @user, @org/team: no notification
+        parts[k] = t.replace("![", "!\\[").replace("](", "]\\(")    # no images or inline links
+    return "`".join(parts)
 
 
 def lane_status(r: dict) -> str:
@@ -3142,7 +3243,7 @@ def pr_comment(ctx: dict) -> str:
     n_models = len(ran) or 1
 
     def loc(f):
-        return f"`{f['file']}:{f['line']}`"
+        return "`" + _cell(f"{f['file']}:{f['line']}", 200).replace("`", "'") + "`"
 
     def reason(f):
         v = f.get("verification") or {}
@@ -3182,26 +3283,38 @@ def pr_comment(ctx: dict) -> str:
     pre = sorted([f for f in merged if f.get("section") == "Pre-existing"], key=key)
     rejected = sorted([f for f in merged if f.get("section") == "Likely non-issues"], key=key)
     out = [f"## AI security review: {len(shown)} finding(s) to check", ""]
-    out.append("Reviewed by " + ", ".join(LANE_DISPLAY.get(x, x) for x in ran) + "; every finding was checked "
-               "by a judge model against the code." if ran else "No reviewer finished.")
+    judged = [f for f in merged if (f.get("verification") or {}).get("status") == "ok"]
+    if not ran:
+        out.append("No reviewer finished.")
+    else:
+        out.append("Reviewed by " + ", ".join(LANE_DISPLAY.get(x, x) for x in ran) + ". "
+                   + (f"A judge model checked {'every one' if len(judged) == len(merged) else f'{len(judged)} of {len(merged)}'}"
+                      " of the findings against the code"
+                      + ("" if len(judged) == len(merged) else "; the others keep the reviewer's own label (*unverified*)")
+                      + "." if merged else ""))
+    if ctx.get("run_status") not in (None, "ok"):
+        out.append(f"**The review stopped early** ({ctx.get('run_status')}): {_cell(ctx.get('stop_reason') or 'see the run log', 200)}")
     units = [u for u in ctx.get("units", []) if u.get("code_files")]
-    skipped = [u for u in units if str(u.get("status", "")).startswith("not reviewed")]
+    skipped = [u for u in units if str(u.get("status", "")).startswith(("not reviewed", "partially reviewed"))]
     if skipped:
-        out.append(f"**Partial review: {len(skipped)} of {len(units)} parts of this PR were not reviewed** "
-                   "(over the PR budget): " + ", ".join(_cell(u["name"], 40) for u in skipped[:10])
+        why = sorted({(re.search(r"\(([^)]*)\)", str(u.get("status", ""))) or [None, "?"])[1] for u in skipped})
+        out.append(f"**Partial review: {len(skipped)} of {len(units)} parts of this PR were not fully reviewed** "
+                   f"({', '.join(why)}): " + ", ".join(_cell(u["name"], 40) for u in skipped[:10])
                    + (" ..." if len(skipped) > 10 else "") + f". Comment `{ctx.get('continue_command') or '/review continue'}` "
                    "to review only the missing parts, with a new budget; finished parts are reused.")
     out.append("")
     if shown:
         out += ["| # | Finding | Severity | Status | Found by | Where |", "|---|---|---|---|---|---|"]
         for f in shown:
-            st = "Bug" if f["section"] == "Bugs" else "Suspected"
+            st = ("Bug" if f["section"] == "Bugs" else "Suspected") + (
+                "" if (f.get("verification") or {}).get("status") == "ok" else " (unverified)")
             ttl = _cell(f['title'], 120) + (f" (also {', '.join(sorted(also[f['mid']], key=lambda m: int(m[1:])))})" if f["mid"] in also else "")
             out.append(f"| {f['mid']} | {ttl} | {f['final_severity']} | {st} | {who(f)} | {loc(f)} |")
         out += ["", "<details><summary>Details</summary>", ""]
         for f in shown:
-            out += [f"**{f['mid']}. {f['title']}** ({f['final_severity']}, {f['category']})", "",
-                    f"- Trigger: {f['trigger']}", f"- Mechanism: {f['mechanism']}", f"- Impact: {f['impact']}",
+            out += [f"**{f['mid']}. {_md_text(f['title'])}** ({f['final_severity']}, {_md_text(f['category'])})", "",
+                    f"- Trigger: {_md_text(f['trigger'])}", f"- Mechanism: {_md_text(f['mechanism'])}",
+                    f"- Impact: {_md_text(f['impact'])}",
                     f"- Judge: {reason(f)}", ""]
         out += ["</details>", ""]
     else:
@@ -3222,7 +3335,7 @@ def pr_comment(ctx: dict) -> str:
                 "|---|---|---|---|---|---|---|"]
         for f in items:
             sev = f["severity"] if f["severity"] == f["final_severity"] else f"{f['severity']} → {f['final_severity']}"
-            out.append(f"| {f['mid']} | {_cell(f['title'], 120)} | {f['category']} | {sev} | {who(f)} | {loc(f)} | "
+            out.append(f"| {f['mid']} | {_cell(f['title'], 120)} | {_cell(f['category'], 60)} | {sev} | {who(f)} | {loc(f)} | "
                        f"{reason(f)} |")
         out += ["", "</details>", ""]
     hk = housekeeping_items(ctx)
@@ -3232,7 +3345,8 @@ def pr_comment(ctx: dict) -> str:
                 "checked by the judge.", "",
                 "| Kind | Item | Where | Fix |", "|---|---|---|---|"]
         for it in sorted(hk, key=lambda i: (HOUSEKEEPING_KINDS.index(i["kind"]), i["file"], i["line"])):
-            out.append(f"| {it['kind']} | {_cell(it['title'], 120)} | `{it['file']}:{it['line']}` | {_cell(it['fix'], 300)} |")
+            where = "`" + _cell(f"{it['file']}:{it['line']}", 200).replace("`", "'") + "`"
+            out.append(f"| {_cell(it['kind'], 40)} | {_cell(it['title'], 120)} | {where} | {_cell(it['fix'], 300)} |")
         out += ["", "</details>", ""]
     out.append(cost_line(ctx))
     return "\n".join(out)
@@ -3252,6 +3366,11 @@ def cost_line(ctx: dict) -> str:
 
 
 def write_report(path: Path, ctx: dict) -> None:
+    # The PR comment first and on its own: a failure in the long report below must not cost the comment.
+    try:
+        write_text(path.with_suffix(".comment.md"), pr_comment(ctx))
+    except Exception as e:  # noqa: BLE001
+        log(f"WARNING: PR comment failed ({type(e).__name__}: {e})")
     meta, merged = ctx["meta"], ctx["merged"]
     b = ctx["billing"]
     rows = ctx["lane_rows"]
@@ -3337,7 +3456,6 @@ def write_report(path: Path, ctx: dict) -> None:
         lines.append(f"| `{p['model']}` | {_cell(p['direct_calls'], 200)} | {_cell(p['harness'], 200)} | {p['json_mode']} |")
     lines += ["", "## Billing detail", "", "```", json.dumps(b, indent=1), "```", ""]
     write_text(path, "\n".join(lines))
-    write_text(path.with_suffix(".comment.md"), pr_comment(ctx))
 
 
 def review_matrix(ctx: dict) -> list[str]:
@@ -3667,6 +3785,12 @@ def main() -> None:
                     help="finder prompt file under prompts/ (default finder.md), e.g. finder_parallel.md")
     ap.add_argument("--lane-effort", default="",
                     help="per-lane reasoning effort overrides, e.g. claude=xhigh,grok=medium (default: high; fable xhigh)")
+    ap.add_argument("--sandbox-check", choices=["off", "warn", "strict"], default="off",
+                    help="Linux: before any paid call, check that a command in the Codex lane sandbox runs and "
+                         "cannot read other processes' environments (strict: stop if not; CI uses strict)")
+    ap.add_argument("--deadline-min", type=float, default=None,
+                    help="minutes after start after which no new part of a split PR starts (its parts are marked "
+                         "'not reviewed (time)'); CI sets it so the review ends inside the job's timeout")
     ap.add_argument("--continue-command", default="/review continue",
                     help="command a partial review's PR comment tells people to post to review the missing parts")
     ap.add_argument("--repo-config", help="repo config TOML instead of repos/<owner>_<repo>.toml (CI: the "
@@ -3686,12 +3810,13 @@ def main() -> None:
                          "estimate (or --run-cap if lower) would exceed this (USD); 0 disables")
     ap.add_argument("--min-remaining", type=float, default=1.00,
                     help="abort before any paid call, and skip verification, if the key has less than this left (USD)")
-    ap.add_argument("--isolate", choices=["keys", "sequential", "mode"], default=None,
+    ap.add_argument("--isolate", choices=["keys", "sequential", "mode", "shared"], default=None,
                     help="billing isolation: keys = one child API key per lane (exact billed per lane, lanes "
                          "parallel; needs the management key in Keychain 'openrouter-mgmt'); sequential = one "
                          "lane at a time with a settled key delta around each (exact per lane, slow); mode = "
-                         "phases one after another, lanes parallel (exact per phase only). Default: keys if the "
-                         "management key exists, else sequential")
+                         "phases one after another, lanes parallel (exact per phase only); shared = like mode, "
+                         "for a key other runs use at the same time (CI): no key-usage settles, budget and "
+                         "watchdog on computed cost. Default: keys if the management key exists, else sequential")
     ap.add_argument("--run-cap", type=float, default=None,
                     help="USD hard stop for the whole run: a watchdog polls spend every 20s and above this kills "
                          "every lane and starts nothing new; also used by the pre-flight check (default: the "
@@ -3733,6 +3858,7 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="seed, units, prompts, estimate only; no paid call")
     ap.add_argument("--head", help="review the PR at this commit of its branch instead of its head (full SHA)")
     args = ap.parse_args()
+    make_undumpable()
     if args.judge_prompt:
         global JUDGE_PROMPT
         JUDGE_PROMPT = Path(args.judge_prompt).resolve()
@@ -3807,7 +3933,9 @@ def main() -> None:
         f"-> {plan['sizes']['class']}; {len(units)} unit(s)")
 
     tm_path = ROOT / cfg["threat_model"]   # an absolute path (--repo-config) stays as is
-    threat = tm_path.read_text() if tm_path.exists() else "(no threat-model note for this repository)"
+    if not tm_path.is_file():
+        log(f"WARNING: threat model {tm_path} not found: reviewing without one")
+    threat = tm_path.read_text() if tm_path.is_file() else "(no threat-model note for this repository)"
     body = (meta.get("body") or "")[:BODY_CAP]
     base_values = {"OUTPUT_SCHEMA": (ROOT / "schema" / "findings.json").read_text().strip(),
                    "VERIFY_SCHEMA": (ROOT / "schema" / "verify.json").read_text().strip(),
@@ -3862,8 +3990,76 @@ def main() -> None:
     LANE_READ_DENY_EXTRA[:] = sorted(str(p) for p in Path(os.path.expanduser("~/.cargo/git/checkouts")).glob(f"{repo_name}-*"))
     lane_wt = isolated_checkout(args.repo, head, mb, scratch / "isolated" / run_dir.name)
     log(f"lanes review an isolated checkout (head + merge-base only, no remote): {lane_wt}")
+    sandbox_selfcheck(args, lane_wt, run_dir, prices)
     run_paid(args, run_dir, meta, lane_wt, mb, head, plan, base_values, template, routing, prices, hprices,
              est_total, tag)
+
+
+def make_undumpable() -> None:
+    """Linux: a process's /proc/<pid>/environ is readable by other processes of the same user (the
+    review lanes' commands) unless it is undumpable. This process holds the API keys and the GitHub
+    token. Its children (codex, claude) are dumpable again after exec: see sandbox_selfcheck."""
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        import ctypes
+        if ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0) != 0:   # PR_SET_DUMPABLE = 4
+            log("WARNING: prctl(PR_SET_DUMPABLE, 0) failed")
+    except Exception as e:  # noqa: BLE001
+        log(f"WARNING: prctl(PR_SET_DUMPABLE, 0) failed: {e}")
+
+
+def sandbox_selfcheck(args, wt: Path, run_dir: Path, prices: dict) -> None:
+    """Before any paid call (Linux, --sandbox-check warn|strict): run one command in the Codex lane
+    sandbox, with no model, and check that (1) it runs and can read the checkout and (2) it cannot read
+    other processes' environments: a canary variable in the codex process's environment stands in for
+    the OpenRouter key every Codex lane process holds. If (2) fails, a prompt-injected lane could read
+    the key and write it into a finding. strict stops the run; warn logs it and goes on."""
+    if args.sandbox_check == "off" or not sys.platform.startswith("linux"):
+        return
+    canary = "aireview-canary-" + secrets.token_hex(8)
+    home = codex_home_for(run_dir / "sandbox_check" / "codex_home", "openai/gpt-6.1-sol", prices, None, [wt])
+    env = base_env() | {"CODEX_HOME": str(home), "AI_REVIEW_CANARY": canary}
+    # env -i: the probe and its children start with a clean environment, so only other processes
+    # (codex and whatever sits between it and the command) can carry the canary
+    # a file the lanes must not read: in CI the runs dir is denied (AI_REVIEW_DENY)
+    denied = run_dir / "sandbox_check" / "denied_probe.txt"
+    denied.parent.mkdir(parents=True, exist_ok=True)
+    denied.write_text("DENIED-PROBE-CONTENT\n")
+    check_denied = any(str(denied.resolve()).startswith(str(Path(d).expanduser().resolve()) + "/")
+                       for d in existing(env_denies()))
+    probe = (f"cat {shlex.quote(str(denied))} 2>/dev/null | grep -q DENIED-PROBE-CONTENT && echo DENIED_READABLE; "
+             "test -r .git/HEAD && echo CHECKOUT_READABLE; n=0; "
+             "for f in /proc/[0-9]*/environ; do "
+             "if tr '\\0' '\\n' < \"$f\" 2>/dev/null | grep -q aireview-canary-; then n=$((n+1)); fi; done; "
+             "echo CANARY_COUNT=$n")
+    try:
+        r = subprocess.run(["codex", "sandbox", "-P", "review", "-C", str(wt), "--",
+                            "env", "-i", "PATH=/usr/bin:/bin", "sh", "-c", probe],
+                           cwd=wt, env=env, capture_output=True, text=True, timeout=120)
+        out = r.stdout + r.stderr
+    except (OSError, subprocess.TimeoutExpired) as e:
+        out = f"could not run codex sandbox: {e}"
+    m = re.search(r"CANARY_COUNT=(\d+)", out)
+    problems = []
+    if "CHECKOUT_READABLE" not in out or not m:
+        problems.append("a sandboxed command could not read the checkout (the Codex sandbox does not work here): "
+                        + out.strip()[-300:])
+    elif check_denied and "DENIED_READABLE" in out:
+        problems.append("a sandboxed command can read a path on the deny list (the runs directory)")
+    elif int(m.group(1)) > 0:
+        problems.append(f"a sandboxed command can read other processes' environments (/proc/<pid>/environ, "
+                        f"{m.group(1)} process(es) with the canary): a prompt-injected Codex lane could read "
+                        "the OpenRouter key")
+    write_json(run_dir / "sandbox_check.json", {"problems": problems, "mode": args.sandbox_check})
+    if not problems:
+        log("sandbox check: lane commands run, read the checkout, and cannot read other processes' environments")
+        return
+    for p in problems:
+        log(f"SANDBOX CHECK FAILED: {p}")
+    if args.sandbox_check == "strict":
+        sys.exit("the sandbox check failed: " + "; ".join(problems)
+                 + " (workflow input sandbox_check: warn, or runner flag --sandbox-check warn, runs anyway)")
 
 
 def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan: dict, base_values: dict,
@@ -3903,7 +4099,7 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
     if why:
         log(f"ABORT before any paid call: {why}")
         _EXACT_SECRETS.clear()
-        sys.exit(2)
+        sys.exit(f"stopped before any paid call: {why}")
     if exp_left is not None and exp_left < args.run_cap:
         log(f"run cap lowered from ${args.run_cap:.2f} to ${exp_left:.2f} (what is left of --experiment-cap)")
         args.run_cap = exp_left
@@ -4120,23 +4316,65 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
         else:
             reuse = ({x if ":" in x else f"agentic:{x}" for x in args.reuse_lanes.split(",") if x.strip()}
                      if reuse_dir else set())
+        # Reuse only what still means the same thing: same head, and per unit the same files (unit ids
+        # are positional, and the base branch's config or the runner may have changed in between).
+        stale_units: set[str] = set()
+        if reuse_dir:
+            try:
+                old_sum = json.loads((reuse_dir / "summary.json").read_text())
+                old_plan = {x["uid"]: sorted(x.get("files") or [])
+                            for x in json.loads((reuse_dir / "plan.json").read_text())["units"]}
+                if old_sum.get("head") != head:
+                    log(f"--reuse-from: earlier run reviewed {old_sum.get('head')}, not {head}: nothing reused")
+                    reuse = set()
+                stale_units = {u.uid for u in units if old_plan.get(u.uid) != sorted(u.files)}
+                if stale_units:
+                    log(f"--reuse-from: units with other files than in the earlier run, not reused: "
+                        f"{', '.join(sorted(stale_units))}")
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                log(f"--reuse-from {reuse_dir}: unreadable summary.json/plan.json ({e}): nothing reused")
+                reuse = set()
+
+        def reused_row(u, m: str, x: str) -> dict | None:
+            """The earlier run's result for this unit, mode and lane, if it can be reused."""
+            if f"{m}:{x}" not in reuse or u.uid in stale_units:
+                return None
+            try:
+                r = json.loads((reuse_dir / "units" / u.uid / m / x / "result.json").read_text())
+            except (OSError, ValueError):
+                return None
+            if not isinstance(r, dict) or r.get("status") != "ok" or not isinstance(r.get("findings", []), list):
+                return None
+            # an artifact is outside data: keep only well-formed findings
+            r["findings"] = [f for f in r.get("findings", []) if isinstance(f, dict)
+                             and all(isinstance(f.get(k), str) for k in ("title", "file", "category"))
+                             and f.get("severity") in SEVERITIES]
+            return r
+
         order = sorted([u for u in units if u.lanes], key=unit_order)
         reviewed = []
         out_of_budget = False
         unit_limit = min(args.pr_budget, args.run_cap) - verify_reserve(args, hprices)
         for u in order:
+            fresh = [(m, x) for m in args.mode_list for x in u.lanes if reused_row(u, m, x) is None]
             est_u = sum((est_agentic(hprices, x, LANES[x][1], len(prompts[(u.uid, m)])) if m == "agentic"
                          else est_static(prices, LANES[x][1], len(prompts[(u.uid, m)]), x))
-                        for m in args.mode_list for x in u.lanes
+                        for m, x in fresh
                         if not (args.claude_auth == "subscription" and LANES[x][0] == "claude"))   # subscription: free
-            if out_of_budget:
+            past_deadline = bool(args.deadline_min and time.time() - RUN_T0 > args.deadline_min * 60)
+            if fresh and past_deadline:
+                u.status = "not reviewed (time)"
+                u.note = f"past --deadline-min {args.deadline_min:g}: no new part starts"
+                log(f"unit {u.uid}: {u.status}")
+                continue
+            if out_of_budget and fresh:
                 u.status, u.note = "not reviewed (budget)", "an earlier unit hit the budget"
                 continue
-            if GUARD.stopped:
+            if fresh and GUARD.stopped:
                 u.status, u.note = "not reviewed (run cap)", GUARD.stop_reason
                 continue
             s = biller.spent()
-            if s + est_u > unit_limit:
+            if fresh and s + est_u > unit_limit:
                 out_of_budget = True
                 u.status = "not reviewed (budget)"
                 u.note = (f"spent ${s:.2f} + unit estimate ${est_u:.2f} > min(--pr-budget, --run-cap) "
@@ -4151,20 +4389,35 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
                 jobs = []
                 for x in u.lanes:
                     out_dir = udir / m / x
-                    if f"{m}:{x}" in reuse and (reuse_dir / "units" / u.uid / m / x / "result.json").exists():
-                        r = json.loads((reuse_dir / "units" / u.uid / m / x / "result.json").read_text())
-                        if r.get("status") == "ok":
-                            r.setdefault("warnings", []).append(f"reused from {reuse_dir.name}")
-                            r["reused_from"] = str(reuse_dir)
-                            r["billed"], r["billed_source"] = None, "reused (billed in the earlier run)"
-                            # keep it in this run too, so a later --reuse-from of this run finds it
-                            out_dir.mkdir(parents=True, exist_ok=True)
-                            write_json(out_dir / "result.json", r)
-                            lane_rows.append(r)
-                            continue
+                    r = reused_row(u, m, x)
+                    if r is not None:
+                        r.setdefault("warnings", []).append(f"reused from {reuse_dir.name}")
+                        r["reused_from"] = str(reuse_dir)
+                        r["billed"], r["billed_source"] = None, "reused (billed in the earlier run)"
+                        # keep it in this run too, so a later --reuse-from of this run finds it
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        write_json(out_dir / "result.json", r)
+                        lane_rows.append(r)
+                        continue
                     jobs.append(finder_job(u, m, x, out_dir))
                 if m == "agentic" and not (args.no_housekeeping or args.no_docs):
-                    jobs.append(housekeeping_job(u, udir))   # runs alongside the finders: no extra wall time
+                    hk = None
+                    if reuse_dir and not jobs and u.uid not in stale_units:   # every finder reused: reuse its notes too
+                        try:
+                            hk = json.loads((reuse_dir / "units" / u.uid / "housekeeping" / "result.json").read_text())
+                        except (OSError, ValueError):
+                            hk = None
+                    if not jobs and (out_of_budget or past_deadline or GUARD.stopped) and not (
+                            isinstance(hk, dict) and hk.get("status") == "ok"):
+                        pass   # a reused part after the budget or time ran out: no new housekeeping run
+                    elif isinstance(hk, dict) and hk.get("status") == "ok":
+                        hk["reused_from"] = str(reuse_dir)
+                        hk["billed"], hk["billed_source"] = None, "reused (billed in the earlier run)"
+                        (udir / "housekeeping").mkdir(parents=True, exist_ok=True)
+                        write_json(udir / "housekeeping" / "result.json", hk)
+                        aux_rows.append(hk)
+                    else:
+                        jobs.append(housekeeping_job(u, udir))   # runs alongside the finders: no extra wall time
                 for r in biller.run_phase(f"{u.uid}/{m}", jobs):
                     if r.get("lane") == "housekeeping":
                         aux_rows.append(r)
@@ -4265,6 +4518,12 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
             for f in to_verify:
                 f["verify_skipped"] = "run cap"
             to_verify = []
+        elif to_verify and args.deadline_min and time.time() - RUN_T0 > (args.deadline_min + 45) * 60:
+            # the judge can take 30 minutes: past the deadline plus the last part's time, report unjudged
+            verify_note = "skipped: past the time limit"
+            for f in to_verify:
+                f["verify_skipped"] = "past the time limit"
+            to_verify = []
         elif to_verify:
             s = biller.spent()
             try:
@@ -4340,7 +4599,8 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
                 judge_tok = claude_token if claude_judge else None   # --claude-auth subscription
                 # Claude Code asks for 128k output: its child key must cover that on top of the spend
                 cap = max(args.verify_cap, budget + 3.00) if claude_judge else args.verify_cap
-                est = 0.0 if judge_tok else est_judge(hprices, len(fs), len(vals["DIFF"]) + 2_500 * len(fs) + 8_000, jl)
+                est = 0.0 if args.claude_auth == "subscription" and judge_tok else est_judge(
+                    hprices, len(fs), len(vals["DIFF"]) + 2_500 * len(fs) + 8_000, jl)
 
                 def jjob(lease: KeyLease, fs=fs, vals=vals, jdir=jdir, label=label, budget=budget, cap=cap,
                          judge_tok=judge_tok) -> dict:
@@ -4351,7 +4611,7 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
                                 jdir / "result.json"))
                 order_fs.append((uid, fs))
             log(f"judging {len(to_verify)} finding(s) in {len(jobs)} {jl} session(s)")
-            for (uid, fs), row in zip(order_fs, biller.run_phase("verify", jobs, workers=3)):
+            for (uid, fs), row in zip(order_fs, biller.run_phase("verify", jobs, workers=6)):
                 row["lane"], row["unit"] = f"judge {uid} ({jl}, {len(fs)} findings)", uid   # billed lands on this row
                 aux_rows.append(row)
                 for f in fs:
@@ -4401,7 +4661,13 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
         GUARD.trip(f"aborted: {type(e).__name__}: {e}"[:200])
         log(f"run aborted ({type(e).__name__}); settling spend and writing what exists")
     finally:
-        signal.signal(signal.SIGTERM, prev_term)
+        # Cancelled (CI: SIGINT, SIGTERM ~7.5 s later, SIGKILL ~2.5 s after that): ignore further signals
+        # so the report and the PR comment get written with what exists.
+        if crash is not None:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+        else:
+            signal.signal(signal.SIGTERM, prev_term)
 
     # Spend accounting: always runs, also after a stop or an abort
     dog.stop()
@@ -4442,7 +4708,11 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
     dirty = "" if status_after == status_before else status_after[:500]
 
     try:
-        after = settled_usage(key, **settle_cfg)
+        # shared key: one quick read, no settle (its usage includes other runs, and a cancelled CI job
+        # has seconds, not minutes, to write its report)
+        after = (None if iso == "shared" and crash is not None
+                 else key_status(key) if iso == "shared" or crash is not None and iso != "keys"
+                 else settled_usage(key, **settle_cfg))
     except Exception as e:  # noqa: BLE001
         log(f"final key read failed: {e}")
         after = None
@@ -4467,6 +4737,11 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
                  "account_note": "account credits usage delta covers every key of the account; a difference is "
                                  "other activity during the run or usage lag"}
         note = "billed per job from its own child key; total = sum of child keys + main-key delta"
+    elif iso == "shared":
+        total = None
+        check = {"note": "shared key: its usage delta includes other runs; this run's cost is the computed total",
+                 "key_usage_delta_all_runs": main_delta}
+        note = "shared key: billed not attributable to this run; cost = computed (tokens x published prices)"
     else:
         total = main_delta
         check = {"sum_of_phases": sum_parts, "total": total,
@@ -4483,7 +4758,7 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
             f"({check['difference_means']})")
     gen = {"looked_up": 0, "found": 0, "total_cost": 0.0}
     for r in lane_rows:
-        if r.get("harness") == "claude":
+        if r.get("harness") == "claude" and r.get("auth") == "openrouter":
             for mid_ in r.get("message_ids", [])[:60]:
                 gen["looked_up"] += 1
                 try:
@@ -4541,7 +4816,20 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
     _EXACT_SECRETS.clear()
     if crash is not None:
         raise crash
+    if status == "killed":
+        sys.exit(3)   # the report and comment are written; tell CI the review did not finish
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit as e:
+        # CI: a run that stops with a message (missing secret, pre-flight abort, failed sandbox check)
+        # leaves it in AI_REVIEW_ERROR_FILE so the workflow can put the reason in the PR comment
+        err_file = os.environ.get("AI_REVIEW_ERROR_FILE")
+        if err_file and isinstance(e.code, str):
+            try:
+                Path(err_file).write_text(mask(e.code)[:500] + "\n")
+            except OSError:
+                pass
+        raise

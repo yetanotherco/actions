@@ -1,4 +1,4 @@
-# Pull request review (finder, prompt v2.6b)
+# Pull request review (finder, prompt v2.7)
 
 You are reviewing a pull request to {{REPO}}. Your job: find bugs and security problems
 that this change introduces or exposes.
@@ -19,7 +19,8 @@ memory safety/panic, supply chain, logic, other.
 
 Report problems introduced or exposed by this change. If a problem already existed
 before the change and the change only touches or exposes it, you may still report it,
-with `pre_existing: true`.
+with `pre_existing: true`. Bugs that hurt honest use count as much as attacks: valid input
+rejected, honest proofs that fail to verify, lost or wrong data, a node that stops syncing.
 
 For every finding give evidence:
 - `file` and `line`: the location in the PR head version.

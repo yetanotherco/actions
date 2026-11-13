@@ -1,8 +1,8 @@
 name: AI Code Review
 
-# Reviews this repository's PRs with its own reusable workflows, called at
-# the `latest` tag so reviews always use the newest released reviewers.
-# Only this repository uses `latest`; other repositories pin a commit SHA.
+# Reviews this repository's PRs with its own reusable workflows, called by
+# local reference: comment triggers run the copies on the default branch.
+# Other repositories pin a commit SHA.
 #
 # Reviews run only on demand. Comment `/review` on a PR for the multi-model
 # review (several models, findings checked by a judge, one comment); add
@@ -22,7 +22,8 @@ jobs:
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
       (github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
-    uses: yetanotherco/actions/.github/workflows/pr_review_multi.yml@latest
+    # A local reference: this repository's own copy at the commit the event runs (main for comments).
+    uses: ./.github/workflows/pr_review_multi.yml
     permissions:
       contents: read
       pull-requests: write
@@ -38,7 +39,7 @@ jobs:
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
       (startsWith(github.event.comment.body, '/claude'))
-    uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@latest
+    uses: ./.github/workflows/pr_review_claude.yml
     permissions:
       contents: read
       pull-requests: write
@@ -74,7 +75,7 @@ jobs:
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
       (startsWith(github.event.comment.body, '/codex'))
-    uses: yetanotherco/actions/.github/workflows/pr_review_codex.yml@latest
+    uses: ./.github/workflows/pr_review_codex.yml
     permissions:
       contents: read
       issues: write
@@ -89,7 +90,7 @@ jobs:
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
       (startsWith(github.event.comment.body, '/kimi'))
-    uses: yetanotherco/actions/.github/workflows/pr_review_kimi.yml@latest
+    uses: ./.github/workflows/pr_review_kimi.yml
     permissions:
       contents: read
       pull-requests: write
@@ -103,7 +104,7 @@ jobs:
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
       (startsWith(github.event.comment.body, '/deepseek'))
-    uses: yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@latest
+    uses: ./.github/workflows/pr_review_openrouter.yml
     permissions:
       contents: read
       pull-requests: write
@@ -120,7 +121,7 @@ jobs:
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
       (startsWith(github.event.comment.body, '/grok'))
-    uses: yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@latest
+    uses: ./.github/workflows/pr_review_openrouter.yml
     permissions:
       contents: read
       pull-requests: write
@@ -135,7 +136,7 @@ jobs:
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
       (startsWith(github.event.comment.body, '/gemini'))
-    uses: yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@latest
+    uses: ./.github/workflows/pr_review_openrouter.yml
     permissions:
       contents: read
       pull-requests: write
