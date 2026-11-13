@@ -1,0 +1,13 @@
+# Review config for this repository, read by pr_review_multi.yml from the PR base branch.
+# Format: see "Multi-model PR Review" in the README.
+threat_model = "threat_model.md"
+
+# Everything here runs in other repositories' CI with their secrets: all of it is security-sensitive.
+default_sensitive = true
+sensitive = [
+  ".github/workflows/**",   # reusable workflows: secrets, tokens, permissions, triggers
+  "ai-review/**",           # the multi-model review runner, its prompts and schemas
+]
+
+# Order of review when a PR is split into parts and the budget runs out.
+priority = [".github/workflows/**", "ai-review/run_pilot.py", "ai-review/**"]

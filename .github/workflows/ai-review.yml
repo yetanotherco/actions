@@ -1,12 +1,14 @@
 name: AI Code Review
 
-# Reviews this repository's PRs with its own reusable workflows, called at
-# the `latest` tag so reviews always use the newest released reviewers.
-# Only this repository uses `latest`; other repositories pin a commit SHA.
+# Reviews this repository's PRs with its own reusable workflows, called by
+# local reference: comment triggers run the copies on the default branch.
+# Other repositories pin a commit SHA.
 #
-# Reviews run only on demand: comment `/review` on a PR to run every
-# reviewer, or `/claude`, `/codex`, `/kimi`, `/deepseek`, `/grok` or `/gemini`
-# to run one.
+# Reviews run only on demand. Comment `/review` on a PR for the multi-model
+# review (several models, findings checked by a judge, one comment); add
+# `continue` to finish a budget-limited review or `budget=N` to raise its
+# budget. Comment `/claude`, `/codex`, `/kimi`, `/deepseek`, `/grok` or
+# `/gemini` for a single model's review.
 
 on:
   issue_comment:
@@ -15,12 +17,29 @@ on:
 permissions: {}
 
 jobs:
+  multi-review:
+    if: >
+      github.event.issue.pull_request &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+      (github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
+    # A local reference: this repository's own copy at the commit the event runs (main for comments).
+    uses: ./.github/workflows/pr_review_multi.yml
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    with:
+      command: /review
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.AI_REVIEW_OPENROUTER_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
   claude-review:
     if: >
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/claude') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
-    uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@latest
+      (startsWith(github.event.comment.body, '/claude'))
+    uses: ./.github/workflows/pr_review_claude.yml
     permissions:
       contents: read
       pull-requests: write
@@ -55,8 +74,8 @@ jobs:
     if: >
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/codex') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
-    uses: yetanotherco/actions/.github/workflows/pr_review_codex.yml@latest
+      (startsWith(github.event.comment.body, '/codex'))
+    uses: ./.github/workflows/pr_review_codex.yml
     permissions:
       contents: read
       issues: write
@@ -70,8 +89,8 @@ jobs:
     if: >
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/kimi') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
-    uses: yetanotherco/actions/.github/workflows/pr_review_kimi.yml@latest
+      (startsWith(github.event.comment.body, '/kimi'))
+    uses: ./.github/workflows/pr_review_kimi.yml
     permissions:
       contents: read
       pull-requests: write
@@ -84,8 +103,8 @@ jobs:
     if: >
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/deepseek') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
-    uses: yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@latest
+      (startsWith(github.event.comment.body, '/deepseek'))
+    uses: ./.github/workflows/pr_review_openrouter.yml
     permissions:
       contents: read
       pull-requests: write
@@ -101,8 +120,8 @@ jobs:
     if: >
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/grok') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
-    uses: yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@latest
+      (startsWith(github.event.comment.body, '/grok'))
+    uses: ./.github/workflows/pr_review_openrouter.yml
     permissions:
       contents: read
       pull-requests: write
@@ -116,8 +135,8 @@ jobs:
     if: >
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/gemini') || github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
-    uses: yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@latest
+      (startsWith(github.event.comment.body, '/gemini'))
+    uses: ./.github/workflows/pr_review_openrouter.yml
     permissions:
       contents: read
       pull-requests: write

@@ -10,10 +10,11 @@ This repository contains reusable GitHub Actions workflows for AI-powered PR cod
 | `pr_review_codex.yml` | Codex (OpenAI) | Uses OpenAI Codex Action |
 | `pr_review_kimi.yml` | Kimi (Moonshot AI) | Sends the diff to the Moonshot API |
 | `pr_review_openrouter.yml` | Any OpenRouter model (DeepSeek, Grok, Gemini, ...) | Sends the diff to the OpenRouter API |
+| `pr_review_multi.yml` | Opus, GPT, Kimi, GLM, DeepSeek + a judge | Agentic multi-model security review; one comment with findings checked against the code ([details](#multi-model-pr-review)) |
 
 ## Review Prompt
 
-Every workflow takes its review focus from the first of:
+Every single-model workflow takes its review focus from the first of (the multi-model review has its own prompts and a per-repository [config](#repository-config)):
 
 1. The `custom_prompt` input, if set
 2. `.github/prompts/ai-review.md` in your repository, read from the PR's base branch, so a PR cannot change the prompt that reviews it
@@ -210,6 +211,126 @@ The diff comes from git, so PRs over the pulls API's 20000-line diff limit still
 
 ---
 
+### Multi-model PR Review
+
+`pr_review_multi.yml` runs a security review with several models and posts **one** comment.
+
+1. **Reviewers.** Opus 5.5 (effort xhigh), GPT 6.1 Sol, Kimi K3.1, GLM 5.3 and DeepSeek V4 Pro review the PR in parallel. Each is an agent (Claude Code or Codex) in a read-only sandbox with no network, so it reads callers, checks and types outside the diff. A soft budget asks each reviewer to finish: after 80 commands (120 for GPT and GLM), about $1.50–2.50 of estimated spend, or 30 minutes, whichever comes first (the command and spend limits double for priority parts of a split PR).
+2. **Housekeeping.** A cheap model (DeepSeek V4 Flash) lists stale docs, missing tests, leftovers and inconsistencies, separately from the security review.
+3. **Merge and judge.** Duplicate findings are merged. A judge (GPT 6.1 Sol) checks the findings against the code, sees every reviewer's claim, and marks each one a bug, suspected, pre-existing, or likely not a problem. The comment says how many it checked; findings it did not reach (more than 20, or over the budget) are marked *unverified*.
+4. **Comment.** It opens with a table of findings to check (severity, status, which models found it, where). Below that come collapsed sections: details, duplicates, pre-existing bugs, findings the judge dismissed (with its reason), and housekeeping. A last line gives what the review cost.
+
+```yaml
+name: AI Review
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  review:
+    if: |
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/review') &&
+      contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    uses: yetanotherco/actions/.github/workflows/pr_review_multi.yml@<tag commit SHA> # <tag>
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    with:
+      command: /review
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.AI_REVIEW_OPENROUTER_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+The workflow also accepts `pull_request` events, for example a `labeled` trigger. Block fork PRs in the caller's `if`, as in the examples above. The workflow refuses them too.
+
+**Commands.** Options go after the command, on the first line of the comment:
+
+| Comment | Effect |
+|---|---|
+| `/review` | Review the PR |
+| `/review budget=80` | Use $80 for this review (at most `max_budget`) |
+| `/review continue` | Review only the parts that an earlier, budget-limited review of the same commit skipped; finished parts are reused |
+
+**Inputs:**
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `command` | No | `/review` | The caller's comment command, used in the hint a partial review prints |
+| `pr_budget` | No | `0` | USD limit per review. `0` = $20 for a PR reviewed in one part, $50 for a PR split into parts |
+| `max_budget` | No | `100` | Highest budget a `budget=N` comment may ask for |
+| `lanes` | No | `''` | Reviewer models, comma-separated: `claude`, `gpt`, `kimi`, `glm`, `deepseek`, `gemini`, `grok`, `fable`. Empty = the first five |
+| `config_dir` | No | `.github/ai-review` | Directory with `config.toml` and `threat_model.md` in your repository |
+| `housekeeping` | No | `true` | Run the housekeeping reviewer |
+| `sandbox_check` | No | `strict` | Check the reviewers' sandbox before any paid call: `strict` stops the review if it fails, `warn` only logs it, `off` skips it ([details](#sandbox-check)) |
+
+**Secrets:**
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `OPENROUTER_API_KEY` | Yes | OpenRouter key for every model but Claude. It must belong to the account that holds the `air-*` provider presets (see below). Give it a credit limit: that limit is the hard ceiling on spend |
+| `ANTHROPIC_API_KEY` | Unless `lanes` leaves out `claude` | Anthropic key for the Opus reviewer. Use a workspace with a monthly spend limit |
+
+The calling job must grant `contents: read`, `pull-requests: write` and `actions: read`. Only the final job, which posts the comment, gets `pull-requests: write`; the jobs that run models get read permissions only. `actions: read` lets `continue` download the earlier review.
+
+#### Repository config
+
+Put a `config.toml` and a `threat_model.md` in `.github/ai-review/` in your repository. Both are read from the PR's base branch, so a PR's own changes to them do not apply to its review. (Callers that also trigger on `pull_request` events run the PR's version of their own workflow file, which can change the inputs.) `threat_model` must be a file name in the same directory. Without a config every file counts as security-sensitive, which is safe but costs more on large PRs.
+
+```toml
+threat_model = "threat_model.md"   # what matters in this repository; goes into every reviewer prompt
+
+# Security-sensitive files. With default_sensitive = true (the default) every file not matched by
+# low_risk is sensitive too, so `sensitive` only orders the review; with false, unmatched files are
+# not sensitive. In a split PR, parts with no sensitive file get only `nonsensitive_lanes`.
+sensitive = ["crates/core/**", "contracts/src/**", "Cargo.toml"]
+default_sensitive = true
+low_risk = ["docs/**", "scripts/**", "examples/**"]
+nonsensitive_lanes = ["claude", "gpt", "kimi"]
+
+# Not reviewed at all (lockfiles, binaries and generated or vendored code are skipped already).
+ignore = ["benches/**", "**/*.json"]
+
+# Extra test file patterns, on top of tests/, *_test.rs, *.test.ts, ...
+test_globs = ["fixtures/**"]
+
+# Review order for large PRs: sensitive parts first, ordered by this list, then parts matching
+# `sensitive`, then the rest. Parts matching these also get twice the per-reviewer budget in a split
+# PR, so keep the list short.
+priority = ["contracts/src/**", "crates/core/**"]
+
+# Large PRs are split into parts by Cargo package, else by the first `unit_depth` path components.
+unit_depth = 2
+```
+
+`threat_model.md` lists what a reviewer should care about most: core guarantees, untrusted inputs, known-dangerous areas. See [`.github/ai-review/`](.github/ai-review/) in this repository for an example.
+
+#### Cost and large PRs
+
+- **Typical cost:** about $3 for a PR reviewed in one part, at API prices; Opus is about 40% of it. The comment's last line shows the cost of each review. In CI this figure is computed from token counts and published prices. The OpenRouter bill is exact, but a key shared by several repositories can't attribute it to one review.
+- **Budget:** a PR over about 4,000 *effective* lines (changed code, with whitespace-only changes and long deletions compacted, plus half the test lines; docs, lockfiles and generated files do not count) is split into parts of about 2,500 lines, up to about 4,000 for one area. The parts are reviewed in the order above until the PR budget runs out, keeping enough for the judge (at least 15% of a split PR's budget). Parts left unreviewed are listed at the top of the comment; `/review continue` reviews them with a new budget.
+- **Hard limits:** each reviewer is killed at its lane cap ($3–4 estimated, doubled for priority parts). A watchdog stops the whole review at the PR budget, counting this review's own computed spend (other reviews may share the key). The ceilings the providers enforce are the OpenRouter key's credit limit, for every model but Opus, and the Anthropic workspace's spend limit, for Opus.
+- **Time:** a one-part PR takes 15–35 minutes. The parts of a split PR run one after another; no new part starts after 240 minutes, so the review and its comment finish inside the job's 330-minute limit, and `continue` picks up the rest.
+
+#### Sandbox check
+
+Before any paid call the runner runs one command in the reviewers' sandbox, with no model, and checks that it works and that it cannot read other processes' environments, where the API keys are. With `sandbox_check: strict` (the default) a failed check stops the review and the comment says why; `warn` only logs it.
+
+#### Provider presets
+
+Each OpenRouter model is called through a preset (`model@preset/air-...`, listed in [`ai-review/presets.json`](ai-review/presets.json)). The preset pins the provider, for example Anthropic's and OpenAI's own servers, or full-precision hosts for open models. Presets belong to an OpenRouter account, so `OPENROUTER_API_KEY` must come from that account. Its privacy setting (no providers that train on prompts) also applies to every key in it.
+
+#### Running it locally
+
+`ai-review/run_pilot.py` is the runner the workflow calls; `python3 ai-review/run_pilot.py --help` lists its options. Locally it reads keys from the macOS Keychain; in CI, from the environment. `--dry-run` shows the parts, the reviewers and the estimated cost without making a paid call.
+
+---
+
 ## Setup
 
 1. Add the required API key as a secret in your repository settings
@@ -234,6 +355,7 @@ All workflows support two trigger methods:
    - `/codex` - Codex PR Review
    - `/kimi` - Kimi PR Review
    - `/deepseek`, `/grok`, `/gemini` - OpenRouter PR Review, with the commands from the OpenRouter table
+   - In this repository, `/review` runs the [multi-model review](#multi-model-pr-review); callers choose their own command
 
 Only repository owners, members, and collaborators can trigger reviews via comments.
 
