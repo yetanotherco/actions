@@ -2,7 +2,7 @@
 
 From a checkout at the PR head and the merge-base it builds a *plan*:
   - every changed file classified as code / test / docs / filtered, with line counts
-    (whitespace-only changes ignored, renames and copies detected);
+    (whitespace-only changes ignored except in whitespace-sensitive files, renames and copies detected);
   - what was filtered and why (lockfile, generated/vendored, repo ignore glob, binary,
     whitespace-only, outside --paths), for the coverage table;
   - test files and the test functions they add / change / remove (tests are not put in the
@@ -54,6 +54,12 @@ TEST_GLOBS = [
 ]
 MANIFESTS = {"Cargo.toml", "package.json", "foundry.toml", "go.mod", "pyproject.toml", "setup.py"}
 
+# Files where a whitespace-only change can change what they do (Python indentation, shell word
+# splitting, YAML nesting, Makefile recipes): their counts and diffs keep whitespace. Every other
+# file's ignore it (-w).
+WS_EXTS = {".py", ".sh", ".bash", ".zsh", ".yml", ".yaml", ".mk"}
+WS_NAMES = {"Makefile", "makefile", "GNUmakefile"}
+
 ATTRS = ("*.rs diff=rust\n*.py diff=python\n*.go diff=golang\n*.sol diff=cpp\n*.ts diff=javascript\n"
          "*.tsx diff=javascript\n*.js diff=javascript\n*.md diff=markdown\n")
 
@@ -95,6 +101,16 @@ def glob_match(path: str, globs: list[str]) -> str | None:
     return None
 
 
+def ws_sensitive(path: str) -> bool:
+    p = PurePosixPath(path)
+    return p.suffix.lower() in WS_EXTS or p.name in WS_NAMES
+
+
+def _ws_flag(path: str) -> list[str]:
+    """`-w` for a file whose whitespace does not matter, nothing for a whitespace-sensitive one."""
+    return [] if ws_sensitive(path) else ["-w"]
+
+
 # --------------------------------------------------------------------------------------
 # git helpers
 
@@ -120,7 +136,7 @@ def _parse_numstat_z(out: str) -> dict[str, tuple[int | None, int | None, str | 
         if not t.strip():
             i += 1
             continue
-        parts = t.split("\t")
+        parts = t.split("\t", 2)   # a path may contain a tab
         if len(parts) < 3:
             i += 1
             continue
@@ -165,7 +181,7 @@ class FileRec:
     path: str
     status: str               # A M D R C T
     old_path: str | None
-    add: int                  # lines, whitespace-only changes ignored (-w)
+    add: int                  # lines, whitespace-only changes ignored (-w) unless ws_sensitive
     dele: int
     add_raw: int
     del_raw: int
@@ -222,7 +238,11 @@ def classify_files(wt: Path, mb: str, head: str, cfg: dict, paths: list[str] | N
     recs: list[FileRec] = []
     for path, (st, old) in sorted(ns.items()):
         a_raw, d_raw, _ = raw.get(path, (None, None, None))
-        a, d, _ = ws.get(path, (a_raw, d_raw, None))
+        if ws_sensitive(path):
+            a, d = a_raw, d_raw   # whitespace can change what the file does: count it
+        else:
+            # `--numstat -w` leaves out a file whose changes are all whitespace: it changed 0 lines
+            a, d, _ = ws.get(path, (0, 0, None))
         binary = a_raw is None
         r = FileRec(path=path, status=st, old_path=old, add=a or 0, dele=d or 0,
                     add_raw=a_raw or 0, del_raw=d_raw or 0, binary=binary)
@@ -240,7 +260,10 @@ def classify_files(wt: Path, mb: str, head: str, cfg: dict, paths: list[str] | N
             r.kind, r.reason = "filtered", f"repo ignore glob `{hit_ignore}`"
         elif hit_gen:
             r.kind, r.reason = "filtered", f"generated/vendored (`{hit_gen}`)"
-        elif (ext in DOC_EXTS and not NOT_DOCS.search(path)) or name in DOC_NAMES:
+        elif ((ext in DOC_EXTS and not NOT_DOCS.search(path)) or name in DOC_NAMES) \
+                and not glob_match(path, list(cfg.get("sensitive", []))):
+            # docs, unless the repo lists them as sensitive (reviewer prompts, allowlists): those are
+            # reviewed as code
             r.kind, r.reason = "docs", "docs lane only"
         elif glob_match(path, test_globs):
             r.kind, r.reason = "test", "test file: listed, not diffed"
@@ -299,6 +322,9 @@ def test_defs(text: str, ext: str) -> list[tuple[str, int]]:
 
 def _blobs(wt: Path, specs: list[str]) -> dict[str, str]:
     """Read many `rev:path` blobs in one git process. Missing ones map to ''."""
+    # One spec per line: a path with a newline would shift every later reply onto the wrong spec (and
+    # git drops a trailing CR). Such paths are left out, so they map to '' too.
+    specs = [s for s in specs if "\n" not in s and "\r" not in s]
     if not specs:
         return {}
     r = subprocess.run(["git", "-C", str(wt), "cat-file", "--batch"], input=("\n".join(specs) + "\n").encode(),
@@ -325,7 +351,8 @@ _MOD_OPEN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{")
 
 def rust_test_ranges(text: str) -> list[list[int]]:
     """1-based inclusive line ranges of `#[cfg(test)] mod x { ... }` blocks (brace counting;
-    braces inside strings or comments can make a range end early or late)."""
+    braces inside strings or comments can make a range end early or late, so a range that does
+    not close cleanly is left out)."""
     lines = text.splitlines()
     out, i = [], 0
     while i < len(lines):
@@ -340,11 +367,23 @@ def rust_test_ranges(text: str) -> list[list[int]]:
                     if depth <= 0 and k > j or (depth == 0 and k == j and "}" in lines[k]):
                         break
                     k += 1
-                out.append([i + 1, min(k + 1, len(lines))])
+                end = min(k + 1, len(lines))
+                # A range that runs past the module would hide the code below it as test code. Keep
+                # it only if it ends with a `}` at the `mod` line's indentation and nothing inside is
+                # indented no deeper than that line (a module's body is indented); otherwise the
+                # module stays in the diff.
+                ind = _indent(lines[j])
+                if lines[end - 1].lstrip().startswith("}") and _indent(lines[end - 1]) == ind and \
+                        not any(ln.strip() and _indent(ln) <= ind for ln in lines[j + 1:end - 1]):
+                    out.append([i + 1, end])
                 i = k + 1
                 continue
         i += 1
     return out
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
 
 
 def _in(ranges: list[list[int]], ln: int) -> bool:
@@ -570,24 +609,34 @@ def _pathspecs(recs: list[FileRec]) -> list[str]:
     return specs
 
 
+def _git_diff(wt: Path, args: list[str], mb: str, head: str, recs: list[FileRec], attrs: Path) -> str:
+    """`git diff <args>` of recs: with -w, and in a second call without it for whitespace-sensitive files."""
+    out = ""
+    for flag in (["-w"], []):
+        rs = [r for r in recs if _ws_flag(r.path) == flag]
+        if rs:
+            out += git(wt, *args, *flag, mb, head, "--", *_pathspecs(rs), attrs=attrs)
+    return out
+
+
 def seed_diff(wt: Path, mb: str, head: str, recs: list[FileRec], attrs: Path,
               cap: int = DIFF_CAP, cfg: dict | None = None,
               omitted_out: list[str] | None = None) -> tuple[str, str, dict[str, int]]:
-    """Whole-function diff of code files (-w -M -C -W), deletion-only hunks compacted.
+    """Whole-function diff of code files (-w -M -C -W; no -w for whitespace-sensitive files),
+    deletion-only hunks compacted.
     Falls back to -U20, then ranking, above `cap` chars. Files the ranked seed leaves out are
     appended to `omitted_out` when given."""
     code = [r for r in recs if r.kind == "code"]
     if not code:
         return "", "no code files in this unit", {}
-    base = ["diff", "--no-color", "--no-ext-diff", "-w", "-M", "-C"]
+    base = ["diff", "--no-color", "--no-ext-diff", "-M", "-C"]
+    ws = "whitespace ignored (not in Python, shell, YAML or Makefiles)"
     tr = {r.path: r.test_ranges for r in code if r.test_ranges}
-    diff, saved = compact_deletions(strip_test_modules(
-        git(wt, *base, "-W", mb, head, "--", *_pathspecs(code), attrs=attrs), tr))
-    mode = "-W (whole function context), whitespace ignored, renames/copies detected"
+    diff, saved = compact_deletions(strip_test_modules(_git_diff(wt, [*base, "-W"], mb, head, code, attrs), tr))
+    mode = f"-W (whole function context), {ws}, renames/copies detected"
     if len(diff) > cap:
-        diff, saved = compact_deletions(strip_test_modules(
-            git(wt, *base, "-U20", mb, head, "--", *_pathspecs(code), attrs=attrs), tr))
-        mode = f"-U20, whitespace ignored (the -W diff exceeded {cap:,} chars)"
+        diff, saved = compact_deletions(strip_test_modules(_git_diff(wt, [*base, "-U20"], mb, head, code, attrs), tr))
+        mode = f"-U20, {ws} (the -W diff exceeded {cap:,} chars)"
     if len(diff) > cap:
         diff, saved, omitted = _ranked_diff(wt, base, mb, head, code, tr, attrs, cap, cfg or {})
         if omitted_out is not None:
@@ -628,7 +677,7 @@ def _ranked_diff(wt: Path, base: list[str], mb: str, head: str, code: list[FileR
         placed = False
         for ctx in ("-W", "-U20", "-U3"):
             d, saved = compact_deletions(strip_test_modules(
-                git(wt, *base, ctx, mb, head, "--", *_pathspecs([r]), attrs=attrs), tr))
+                git(wt, *base, *_ws_flag(r.path), ctx, mb, head, "--", *_pathspecs([r]), attrs=attrs), tr))
             if used + len(d) <= cap:
                 parts.append(d); used += len(d); saved_all.update(saved); placed = True
                 break
@@ -672,7 +721,7 @@ def changed_symbols(wt: Path, mb: str, head: str, recs: list[FileRec], attrs: Pa
     code = [r for r in recs if r.kind == "code"]
     if not code:
         return {}
-    d = git(wt, "diff", "--no-color", "-w", "-M", "-C", "-U0", mb, head, "--", *_pathspecs(code), attrs=attrs)
+    d = _git_diff(wt, ["diff", "--no-color", "-M", "-C", "-U0"], mb, head, code, attrs)
     out: dict[str, list[str]] = {}
     cur = None
     for ln in d.splitlines():
@@ -777,7 +826,10 @@ def plan_units(wt: Path, head: str, recs: list[FileRec], cfg: dict, force_single
             # paths below the area, not basenames: chunks are disjoint runs of the sorted paths, so
             # their first paths differ and every chunk gets its own key. Basenames collide
             # (`{mod.rs .. mod.rs}`) and the later chunk replaced the earlier one in `nxt`.
-            first, last = ch[0].path.removeprefix(a + "/"), ch[-1].path.removeprefix(a + "/")
+            # "(root)" holds top-level files: keep a `(root)/` directory's prefix, or `(root)/z.rs`
+            # and `z.rs` would get the same key
+            pre = "" if a == "(root)" else a + "/"
+            first, last = ch[0].path.removeprefix(pre), ch[-1].path.removeprefix(pre)
             return f"{a}/{{{first}}}" if len(ch) == 1 else f"{a}/{{{first} .. {last}}}"
         chunk = []
         for f in sorted(fs, key=lambda f: f.path):
@@ -872,6 +924,28 @@ def filtered_table(recs: list[FileRec]) -> list[dict]:
     return rows
 
 
+_ODD_NAME = re.compile("[\t\n\r\ufffd]")   # U+FFFD: a path that is not UTF-8 (git output is read with "replace")
+
+
+def not_reviewed(recs: list[FileRec], changed: int | None = None) -> dict:
+    """Changed files whose changes no reviewer sees, for the PR comment: file names the plan cannot
+    handle (tab, newline, CR, not UTF-8), files git treats as binary (attributes, a NUL byte),
+    whitespace-only changes, and code or test files placed in no unit. `changed`: how many paths git
+    lists; paths missing from `recs` (two names that are not UTF-8 read as one) count as "unlisted"."""
+    files = []
+    for r in recs:
+        if r.reason == "outside --paths":
+            continue
+        why = ("unusual file name" if _ODD_NAME.search(r.path)
+               else "binary to git" if r.reason == "binary"
+               else "whitespace-only change" if r.reason == "whitespace-only change"
+               else "not placed in a part" if r.kind in ("code", "test") and not r.unit
+               else "")
+        if why:
+            files.append({"file": r.path, "why": why})
+    return {"files": files, "unlisted": max((changed or 0) - len(recs), 0)}
+
+
 def sizes(recs: list[FileRec]) -> dict:
     raw = sum(r.add_raw + r.del_raw for r in recs)
     by_kind: dict[str, int] = {}
@@ -890,5 +964,5 @@ def sizes(recs: list[FileRec]) -> dict:
 
 
 __all__ = ["FileRec", "Unit", "classify_files", "collect_tests", "tests_block", "seed_diff", "plain_diff",
-           "docs_diff", "changed_symbols", "plan_units", "filtered_table", "sizes", "size_class", "glob_match",
-           "ATTRS", "NORMAL_MAX", "LARGE_MAX", "TEST_WEIGHT", "DIFF_CAP"]
+           "docs_diff", "changed_symbols", "plan_units", "filtered_table", "not_reviewed", "sizes", "size_class",
+           "glob_match", "ws_sensitive", "ATTRS", "NORMAL_MAX", "LARGE_MAX", "TEST_WEIGHT", "DIFF_CAP"]

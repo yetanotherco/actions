@@ -267,7 +267,7 @@ The workflow also accepts `pull_request` events, for example a `labeled` trigger
 | `lanes` | No | `''` | Reviewer models, comma-separated: `claude`, `gpt`, `kimi`, `glm`, `deepseek`, `gemini`, `grok`, `fable`. Empty = the first five |
 | `config_dir` | No | `.github/ai-review` | Directory with `config.toml` and `threat_model.md` in your repository |
 | `housekeeping` | No | `true` | Run the housekeeping reviewer |
-| `sandbox_check` | No | `strict` | Check the reviewers' sandbox before any paid call: `strict` stops the review if it fails, `warn` only logs it, `off` skips it ([details](#sandbox-check)) |
+| `sandbox_check` | No | `strict` | Check the Codex reviewers' sandbox before any paid call (not Claude Code's): `strict` stops the review if it fails, `warn` only logs it, `off` skips it ([details](#sandbox-check)) |
 
 **Secrets:**
 
@@ -280,7 +280,7 @@ The calling job must grant `contents: read`, `pull-requests: write` and `actions
 
 #### Repository config
 
-Put a `config.toml` and a `threat_model.md` in `.github/ai-review/` in your repository. Both are read from the PR's base branch, so a PR's own changes to them do not apply to its review. (Callers that also trigger on `pull_request` events run the PR's version of their own workflow file, which can change the inputs.) `threat_model` must be a file name in the same directory. Without a config every file counts as security-sensitive, which is safe but costs more on large PRs.
+Put a `config.toml` and a `threat_model.md` in `.github/ai-review/` in your repository. Both are read from the PR's base branch, so a PR's own changes to them do not apply to its review. (Callers that also trigger on `pull_request` events run the PR's version of their own workflow file, which can change the inputs.) `threat_model` must be the name of a `.md` file in the same directory: the workflow fetches only `*.toml` and `*.md` files. Without a config every file counts as security-sensitive, which is safe but costs more on large PRs.
 
 ```toml
 threat_model = "threat_model.md"   # what matters in this repository; goes into every reviewer prompt
@@ -313,21 +313,21 @@ unit_depth = 2
 #### Cost and large PRs
 
 - **Typical cost:** about $3 for a PR reviewed in one part, at API prices; Opus is about 40% of it. The comment's last line shows the cost of each review. In CI this figure is computed from token counts and published prices. The OpenRouter bill is exact, but a key shared by several repositories can't attribute it to one review.
-- **Budget:** a PR over about 4,000 *effective* lines (changed code, with whitespace-only changes and long deletions compacted, plus half the test lines; docs, lockfiles and generated files do not count) is split into parts of about 2,500 lines, up to about 4,000 for one area. The parts are reviewed in the order above until the PR budget runs out, keeping enough for the judge (at least 15% of a split PR's budget). Parts left unreviewed are listed at the top of the comment; `/review continue` reviews them with a new budget.
+- **Budget:** a PR over about 4,000 *effective* lines (changed code, with whitespace-only changes, except in Python, shell, YAML and Makefiles, and long deletions compacted, plus half the test lines; docs, lockfiles and generated files do not count) is split into parts of about 2,500 lines, up to about 4,000 for one area. The parts are reviewed in the order above until the PR budget runs out, keeping enough for the judge (at least 15% of a split PR's budget). Parts left unreviewed are listed at the top of the comment; `/review continue` reviews them with a new budget. Changed files that no reviewer saw (binary to git, whitespace-only changes, unusual file names) are listed there too.
 - **Hard limits:** each reviewer is killed at its lane cap ($3–4 estimated, doubled for priority parts). A watchdog stops the whole review at the PR budget, counting this review's own computed spend (other reviews may share the key). The ceilings the providers enforce are the OpenRouter key's credit limit, for every model but Opus, and the Anthropic workspace's spend limit, for Opus.
 - **Time:** a one-part PR takes 15–35 minutes. The parts of a split PR run one after another; no new part starts after 240 minutes, so the review and its comment finish inside the job's 330-minute limit, and `continue` picks up the rest.
 
 #### Sandbox check
 
-Before any paid call the runner runs one command in the reviewers' sandbox, with no model, and checks that it works and that it cannot read other processes' environments, where the API keys are. With `sandbox_check: strict` (the default) a failed check stops the review and the comment says why; `warn` only logs it.
+Before any paid call the runner runs one command in the sandbox of the Codex reviewers (every model but Opus and Fable), with no model, and checks that it works and that it cannot read other processes' environments, where the API keys are. With `sandbox_check: strict` (the default) a failed check stops the review and the comment says why; `warn` only logs it. The check does not cover the Claude Code sandbox that Opus and Fable run in.
 
 #### Provider presets
 
-Each OpenRouter model is called through a preset (`model@preset/air-...`, listed in [`ai-review/presets.json`](ai-review/presets.json)). The preset pins the provider, for example Anthropic's and OpenAI's own servers, or full-precision hosts for open models. Presets belong to an OpenRouter account, so `OPENROUTER_API_KEY` must come from that account. Its privacy setting (no providers that train on prompts) also applies to every key in it.
+Each OpenRouter model is called through a preset (`model@preset/air-...`, listed in [`ai-review/presets.json`](ai-review/presets.json)). The preset pins the provider, for example Anthropic's and OpenAI's own servers, or full-precision hosts for open models. The runner uses a model's preset only when OpenRouter's live endpoint list, read at the start of the review, shows a host the pin allows (for some open models, also under a price limit). If that check fails, for example because the lookup errors, that reviewer runs unpinned, on any host, for the whole review; the report in the run's artifact marks it `UNPINNED`. Presets belong to an OpenRouter account, so `OPENROUTER_API_KEY` must come from that account. Its privacy setting (no providers that train on prompts) also applies to every key in it.
 
 #### Running it locally
 
-`ai-review/run_pilot.py` is the runner the workflow calls; `python3 ai-review/run_pilot.py --help` lists its options. Locally it reads keys from the macOS Keychain; in CI, from the environment. `--dry-run` shows the parts, the reviewers and the estimated cost without making a paid call.
+`ai-review/run_pilot.py` is the runner the workflow calls. It needs Python 3.11 or newer; `python3 ai-review/run_pilot.py --help` lists its options. It reads the OpenRouter key from `OPENROUTER_API_KEY` when that is set, else from the macOS Keychain. Its defaults are not CI's: CI passes `--isolate shared --claude-auth anthropic --experiment-cap 0 --sandbox-check strict --deadline-min 240` (see `pr_review_multi.yml`), while locally Opus goes through OpenRouter, spend is isolated per reviewer, a $50 cap over all local runs applies, and the sandbox check is off. `--dry-run` shows the parts, the reviewers and the estimated cost without making a paid call.
 
 ---
 

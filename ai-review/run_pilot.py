@@ -44,7 +44,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-import seed as seedlib
+# seed.py sits next to this file; `python -I` (isolated mode) does not put the script's directory on
+# the import path, so add it
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import seed as seedlib  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 OR_API = "https://openrouter.ai/api/v1"
@@ -1516,10 +1519,11 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
         res["warnings"].append(f"soft budget stop at {tail.gate['elapsed_s']}s: {tail.gate['reason']}; "
                                f"{tail.refused} command(s) refused after it")
     res["computed_cost"] = computed_cost(prices, model, usage["input"], usage["cached"], usage["output"])
-    if killed and not usage["input"] and tail.est_in:
-        # killed before Codex reported usage: keep the ESTIMATE so the spend is not shown as $0
+    if not usage["input"] and tail.est_in:
+        # killed, timed out or failed before Codex reported usage: keep the ESTIMATE so the spend is
+        # not shown, or counted against the budget, as $0
         res["computed_cost"] = round(tail.estimated_cost(), 6)
-        res["warnings"].append("computed cost is an ESTIMATE: the lane was killed before Codex reported usage")
+        res["warnings"].append("computed cost is an ESTIMATE: the lane ended before Codex reported usage")
     final = last.read_text(errors="replace") if last.exists() else (msgs[-1] if msgs else "")
     res["final_text"] = final
     if killed:
@@ -2663,7 +2667,9 @@ def preflight_abort(est_total: float, run_cap: float, remaining: float | None, m
     need = min(est_total, run_cap)
     if need > remaining and not allow_over:
         return (f"min(estimate ${est_total:.2f}, --run-cap ${run_cap:.2f}) = ${need:.2f} exceeds the remaining "
-                f"${remaining:.2f} (pass --allow-over-remaining to run anyway)")
+                f"${remaining:.2f}. Top up the key or raise its credit limit, or ask for a smaller budget "
+                f"(in CI, `budget=N` after the review command; locally --pr-budget, or "
+                f"--allow-over-remaining to run anyway)")
     return None
 
 
@@ -2751,16 +2757,19 @@ def _cell(s: str, n: int = 300) -> str:
 
 def _md_text(s: str) -> str:
     """Model-written text for the public PR comment: no HTML (tags, comments that hide the rest of the
-    comment), no @mentions, no images or links, no blank lines. Every `<`/`>` is neutralized, also
+    comment), no @mentions (also not as entities such as `&#64;`), no images or Markdown links, one
+    line. Bare URLs are left as they are (GitHub links them). Every `<`/`>` is neutralized, also
     inside what looks like a code span (a span can be faked or ended early): outside spans as HTML
     entities, inside as look-alike brackets, which GitHub shows as they are (`Vec‹u8›`)."""
-    s = re.sub(r"\s*\n\s*", " ", str(s))   # one paragraph: a blank line would end a code span
+    # one line: a line break (a lone CR is one too) would end a table row or a code span
+    s = re.sub(r"\s*[\r\n]\s*", " ", str(s))
     parts = s.replace("\\`", "'").split("`")
     if len(parts) % 2 == 0:   # an unmatched backtick: the tail is plain text
         parts[-2:] = [parts[-2] + "'" + parts[-1]]
     for k in range(len(parts)):
         t = parts[k]
-        t = t.replace("<", "‹").replace(">", "›") if k % 2 else t.replace("<", "&lt;").replace(">", "&gt;")
+        t = t.replace("<", "‹").replace(">", "›") if k % 2 else \
+            t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")   # `&`: no entities
         t = re.sub(r"@(?=[A-Za-z0-9])", "@\u200b", t)          # @user, @org/team: no notification
         parts[k] = t.replace("![", "!\\[").replace("](", "]\\(")    # no images or inline links
     return "`".join(parts)
@@ -3007,6 +3016,9 @@ def build_plan(args, meta: dict, wt: Path, mb: str, head: str, cfg: dict, scratc
     recs = seedlib.classify_files(wt, mb, head, cfg, paths)
     seedlib.collect_tests(wt, mb, head, recs)
     units = seedlib.plan_units(wt, head, recs, cfg, force_single=args.no_split)
+    # what the comment must list as not reviewed; git's own count catches paths the records lost
+    changed = seedlib.git(wt, "diff", "--name-only", "-z", "-M", "-C", mb, head).count("\0")
+    not_reviewed = seedlib.not_reviewed(recs, changed)
     sizes = seedlib.sizes(recs)
     requested = args.lane_list
     nonsens = [x for x in cfg.get("nonsensitive_lanes", NONSENSITIVE_LANES) if x in requested] or requested
@@ -3014,7 +3026,7 @@ def build_plan(args, meta: dict, wt: Path, mb: str, head: str, cfg: dict, scratc
     for u in units:
         u.lanes = requested if (not split or u.sensitive) else nonsens
         if u.code_files == 0:
-            u.status, u.note, u.lanes = "not reviewed", "tests only (no code in this unit)", []
+            u.status, u.note, u.lanes = "not reviewed", "no code in this part", []
     # per-unit diffs (computed once, also for the dry run)
     by_path = {r.path: r for r in recs}
     unit_data = {}
@@ -3048,7 +3060,7 @@ def build_plan(args, meta: dict, wt: Path, mb: str, head: str, cfg: dict, scratc
     return {"recs": recs, "units": units, "sizes": sizes, "unit_data": unit_data, "split": split,
             "leftover_docs_diff": seedlib.docs_diff(wt, mb, head, leftover_docs, attrs) if leftover_docs else "",
             "leftover_docs": [r.path for r in leftover_docs], "pr_map_input": pr_map_in, "paths": paths,
-            "attrs": attrs}
+            "attrs": attrs, "not_reviewed": not_reviewed}
 
 
 def unit_listed(u) -> bool:
@@ -3302,6 +3314,18 @@ def pr_comment(ctx: dict) -> str:
                    f"({', '.join(why)}): " + ", ".join(_cell(u["name"], 40) for u in skipped[:10])
                    + (" ..." if len(skipped) > 10 else "") + f". Comment `{ctx.get('continue_command') or '/review continue'}` "
                    "to review only the missing parts, with a new budget; finished parts are reused.")
+    nr = ctx.get("not_reviewed") or {}
+    nr_files, unlisted = nr.get("files") or [], nr.get("unlisted") or 0
+    if nr_files or unlisted:
+        by_why: dict[str, list[str]] = {}
+        for f in nr_files:
+            by_why.setdefault(f["why"], []).append(f["file"])
+        groups = [f"{why} ({len(ps)}): " + ", ".join("`" + _cell(p, 120).replace("`", "'") + "`" for p in ps[:10])
+                  + (" ..." if len(ps) > 10 else "") for why, ps in by_why.items()]
+        if unlisted:
+            groups.append(f"{unlisted} more with a file name that is not UTF-8")
+        out.append(f"**Not reviewed: {len(nr_files) + unlisted} changed file(s)**; no reviewer saw their changes: "
+                   + "; ".join(groups) + ".")
     out.append("")
     if shown:
         out += ["| # | Finding | Severity | Status | Found by | Where |", "|---|---|---|---|---|---|"]
@@ -4431,9 +4455,15 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
                         f"computed {fmt_cost(r.get('computed_cost'))}")
             failed = [f"{r.get('mode')}:{r['lane']}" for r in lane_rows if r.get("unit") == u.uid and r.get("status") != "ok"]
             killed = [r for r in lane_rows if r.get("unit") == u.uid and r.get("status") == "killed"]
-            u.status = "reviewed" + (f" ({len(failed)} lane(s) did not finish: {', '.join(failed)})" if failed else "")
+            finished = any(r.get("unit") == u.uid and r.get("status") == "ok" for r in lane_rows)
+            u.status = "reviewed"
             if killed and GUARD.stopped:
                 u.status = "partially reviewed (run cap)" + (f": {', '.join(failed)} did not finish" if failed else "")
+            elif failed:
+                # a reviewer that failed or was stopped (key out of credit, provider outage, timeout) did not
+                # review this part: the comment lists the part, with the `continue` hint
+                u.status = ("partially" if finished else "not") + " reviewed (reviewers failed)"
+                u.note = f"did not finish: {', '.join(failed)}"
 
         # Phase: docs lane, one call per reviewed unit, in parallel
         if args.docs_lane and reviewed:
@@ -4786,6 +4816,7 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
            "requested_lanes": args.lane_list, "merge_info": merge_info, "verify_note": verify_note,
            "worktree_dirty": dirty, "sizes": plan["sizes"], "paths": plan["paths"],
            "units": [u.__dict__ for u in units], "filtered": seedlib.filtered_table(plan["recs"]),
+           "not_reviewed": plan["not_reviewed"],
            "pr_map": pr_map, "pinning": routing.table(sorted({r.get("model") for r in lane_rows if r.get("model")}
                                                              | {DOCS_MODEL})),
            "estimate_total": est_total, "isolation": iso, "isolation_note": iso_note, "phases": phases,

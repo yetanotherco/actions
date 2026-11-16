@@ -9,5 +9,6 @@ sensitive = [
   "ai-review/**",           # the multi-model review runner, its prompts and schemas
 ]
 
-# Order of review when a PR is split into parts and the budget runs out.
-priority = [".github/workflows/**", "ai-review/run_pilot.py", "ai-review/**"]
+# Reviewed first when a PR is split into parts and the budget runs out. Parts matching these also
+# get twice the per-reviewer budget, so the list names only what handles secrets and keys.
+priority = [".github/workflows/**", "ai-review/run_pilot.py"]

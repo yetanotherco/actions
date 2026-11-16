@@ -1,7 +1,8 @@
 name: AI review runner check
 
-# Cheap checks of the multi-model review runner on every PR that changes it: it compiles, its CLI
-# parses, and its schemas, presets and this repository's review config are valid.
+# Cheap checks of the multi-model review runner on every PR that changes it or its workflows: it
+# compiles, its CLI parses, its schemas, presets and this repository's review config are valid, and
+# its offline tests pass (unit planning, coverage of changed files, the PR comment).
 
 on:
   pull_request:
@@ -9,6 +10,8 @@ on:
       - 'ai-review/**'
       - '.github/ai-review/**'
       - '.github/workflows/ai-review-check.yml'
+      - '.github/workflows/pr_review_multi.yml'
+      - '.github/workflows/ai-review.yml'
 
 permissions:
   contents: read
@@ -32,3 +35,7 @@ jobs:
           cfg = tomllib.loads(pathlib.Path(".github/ai-review/config.toml").read_text())
           assert (pathlib.Path(".github/ai-review") / cfg.get("threat_model", "threat_model.md")).is_file()
           PY
+
+      - name: Test the runner
+        # standard library only: temporary git repositories, no network, no keys, no model
+        run: python3 -I -B -m unittest discover -s ai-review/tests -v

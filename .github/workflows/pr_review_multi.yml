@@ -49,7 +49,7 @@ on:
         type: boolean
         default: true
       sandbox_check:
-        description: "Before any paid call, check that a command in the reviewers' sandbox runs and cannot read other processes' environments (where the API keys are). 'strict' stops the review if not, 'warn' only logs it"
+        description: "Before any paid call, check that a command in the Codex reviewers' sandbox runs and cannot read other processes' environments (where the API keys are); the Claude Code sandbox (Opus) is not checked. 'strict' stops the review if the check fails, 'warn' only logs it"
         required: false
         type: string
         default: 'strict'
