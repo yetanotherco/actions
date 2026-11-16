@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""Local pilot of the multi-model AI pull-request review pipeline.
+"""Multi-model AI pull-request review: the runner behind .github/workflows/pr_review_multi.yml,
+also runnable locally.
 
 One PR per invocation:
   seed (PR metadata, worktree at PR head, trimmed whole-function diff, tests list, threat model)
   -> size class: normal (one unit) / large / huge (review units by area, budget-guarded)
   -> PR map for split PRs (one cheap call)
-  -> per unit, per mode (agentic / static-seed / static-diff), finder lanes in parallel
-  -> docs lane -> deterministic grouping + one LLM merge call over the union of all modes
-  -> cross-model verification once per merged finding -> local markdown report.
+  -> per unit, finder lanes in parallel (agentic; the static modes are for experiments), plus the
+     housekeeping lane
+  -> deterministic grouping + one LLM merge call
+  -> one judge session per unit checks the merged findings -> PR comment and markdown report.
 
-Costs: per-lane computed cost from token usage x OpenRouter prices of the endpoint the
-request is pinned to, plus the billed cost for the whole run from the OpenRouter key usage
-delta (GET /api/v1/key before/after).
+Costs: per-lane computed cost from token usage x the prices of the endpoint the request is pinned
+to; billed cost from the OpenRouter key's usage delta (GET /api/v1/key) where --isolate can
+attribute it.
 
-Secrets: the OpenRouter key is read from the macOS Keychain inside this process, passed
-only through child-process environments and request headers, never printed or written.
-Everything printed or saved passes through mask().
+Secrets: the OpenRouter key comes from OPENROUTER_API_KEY, else (locally) the macOS Keychain; the
+Anthropic key (--claude-auth anthropic) from ANTHROPIC_API_KEY. Keys are passed only through
+child-process environments and request headers, never printed or written. Everything printed or
+saved passes through mask().
 """
 
 from __future__ import annotations
@@ -1001,7 +1004,8 @@ def load_repo_config(owner: str, name: str, path: str | None = None) -> dict:
             cfg["source"] = str(p.relative_to(ROOT))
             break
     if cfg["source"] is None:
-        log(f"no repo config for {owner}/{name} (repos/{owner}_{name}.toml): every path counts as sensitive, "
+        log(f"no repo config for {owner}/{name} (no --repo-config, no repos/{owner}_{name}.toml next to the "
+            f"runner): every path counts as sensitive, "
             "so every unit gets every lane (the safe default)")
     return cfg
 
@@ -1691,7 +1695,7 @@ def run_claude(name: str, model: str, sent_model: str, small_model: str, prompt:
     settings_path = out_dir / "settings.json"
     settings = claude_settings(wt)
     gate_tail = None
-    if soft and not static:   # soft budget via a PreToolUse hook (the only hook enabled)
+    if soft and not static:   # soft budget via a PreToolUse hook (with a PostToolUse hook; no other hooks run)
         flag, refused, hooks = claude_gate(out_dir / "gate")
         settings.pop("disableAllHooks", None)
         settings["hooks"] = hooks
@@ -1855,7 +1859,7 @@ def run_lane(name: str, harness: str, model: str, prompt: str, schema_path: Path
              codex_cap: float | None = None, label: str = "", estimate_cap: bool = True,
              soft: dict | None = None, auth_token: str | None = None, effort: str | None = None) -> dict:
     """budget: Claude Code --max-budget-usd; codex_cap: Codex lane cap (usage tail); soft: Codex
-    soft budget (FINDER_SOFT / VERIFY_SOFT; Claude Code lanes have none)."""
+    soft budget (FINDER_SOFT / VERIFY_SOFT; Claude Code lanes get CLAUDE_SOFT through hooks)."""
     pin_note = ""
     try:
         if harness == "claude" and auth_token:
@@ -3082,8 +3086,9 @@ def verify_reserve(args, hprices: dict) -> float:
         return 0.0
     if args.verify_reserve is not None:
         return args.verify_reserve
-    # the judge runs once per reviewed unit (Opus xhigh, ~$0.75 each, estimate): keep 15% of a split PR's
-    # budget for it (2026-11-12: $0.61 was kept, against ~$7.50 for 10 judged units)
+    # the judge runs once per reviewed unit (estimate ~$0.30 each with GPT, the default; ~$0.75 with
+    # Opus xhigh): keep 15% of a split PR's budget for it (2026-11-12, Opus judge: $0.61 was kept,
+    # against ~$7.50 for 10 judged units)
     share = 0.15 if getattr(args, "split_pr", False) else 0.0
     return max(est_verify(hprices, 2), share * (args.pr_budget or 0), 1.00)
 
@@ -3738,9 +3743,11 @@ def dry_run_report(args, plan: dict, prices: dict, hprices: dict, routing: Routi
           f"Billing isolation: **{iso}** ({iso_note}).", "",
           "| isolation | billed resolution | est. wall time (ESTIMATE) |", "|---|---|---|"]
     res = {"keys": "exact per lane (child key each)", "sequential": "exact per lane (one at a time)",
-           "mode": "exact per phase (unit x mode), not per lane"}
-    for k in ("keys", "sequential", "mode"):
-        L.append(f"| {'**' + k + '**' if k == iso else k} | {res[k]} | ~{walls[k] / 60:.0f} min |")
+           "mode": "exact per phase (unit x mode), not per lane",
+           "shared": "none: the key is shared with other runs; spend is computed from token counts"}
+    for k in ("keys", "sequential", "mode", "shared"):
+        wall = walls.get(k, walls["keys"])   # shared runs lanes in parallel, like keys
+        L.append(f"| {'**' + k + '**' if k == iso else k} | {res[k]} | ~{wall / 60:.0f} min |")
     L += ["", f"Wall-time ESTIMATE: agentic lane ~{EST_WALL_S['agentic'] // 60} min, static ~{EST_WALL_S['static'] // 60} "
               f"min, verification ~{EST_WALL_S['verify'] // 60} min, docs/merge/PR map ~{EST_WALL_S['aux'] // 60} min, "
               f"each key-usage settle ~{(args.settle_s + 30) / 60:.1f} min; units that --pr-budget would skip excluded.", "",
@@ -3795,18 +3802,19 @@ def main() -> None:
                     help="also run the old diff-only stale-comment lane (replaced by the housekeeping lane)")
     ap.add_argument("--verify-min", choices=SEVERITIES, default="low",
                     help="verify merged findings of this severity and above (default low: all; docs never). "
-                         "Medium/low go to GPT unless GPT reported them")
+                         "With --verify-each, medium/low go to GPT unless GPT reported them")
     ap.add_argument("--max-verify", type=int, default=20,
                     help="most findings verified per run, most severe first (default 20)")
     ap.add_argument("--claude-auth", choices=["openrouter", "subscription", "anthropic"], default="openrouter",
-                    help="Claude Code lanes (claude, fable) on OpenRouter, or on your Claude subscription "
+                    help="Claude Code lanes (claude, fable) on OpenRouter, on the Anthropic API (anthropic: "
+                         "ANTHROPIC_API_KEY from the environment; what CI uses), or on your Claude subscription "
                          f"(token from `claude setup-token` in Keychain '{CLAUDE_OAUTH_KEYCHAIN_ITEM}'); "
                          "subscription lanes are not billed on OpenRouter: their cost is shown API-equivalent")
     ap.add_argument("--judge", choices=list(LANES), default="gpt",
                     help="lane of the batched judge: one session per unit checks every finding (default gpt: "
-                         "same accuracy as Opus high on 7 labeled PRs at half the cost, README item 8)")
+                         "as accurate as Opus high on the pilot's 7 labeled PRs, at half the cost)")
     ap.add_argument("--finder-prompt", default=None,
-                    help="finder prompt file under prompts/ (default finder.md), e.g. finder_parallel.md")
+                    help="finder prompt file under prompts/ (default finder.md; for prompt experiments)")
     ap.add_argument("--lane-effort", default="",
                     help="per-lane reasoning effort overrides, e.g. claude=xhigh,grok=medium (default: high; fable xhigh)")
     ap.add_argument("--sandbox-check", choices=["off", "warn", "strict"], default="off",
@@ -3817,8 +3825,9 @@ def main() -> None:
                          "'not reviewed (time)'); CI sets it so the review ends inside the job's timeout")
     ap.add_argument("--continue-command", default="/review continue",
                     help="command a partial review's PR comment tells people to post to review the missing parts")
-    ap.add_argument("--repo-config", help="repo config TOML instead of repos/<owner>_<repo>.toml (CI: the "
-                    "reviewed repository's .github/ai-review/config.toml from its base branch)")
+    ap.add_argument("--repo-config", help="repo config TOML (default: repos/<owner>_<repo>.toml next to this "
+                    "file, if it exists; CI passes the reviewed repository's .github/ai-review/config.toml from "
+                    "its base branch)")
     ap.add_argument("--judge-prompt", help="judge prompt file instead of prompts/verify_batch.md (experiments)")
     ap.add_argument("--judge-effort", choices=["low", "medium", "high", "xhigh", "max"], default="high",
                     help="reasoning effort of the judge (default high)")

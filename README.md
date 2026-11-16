@@ -274,7 +274,7 @@ The workflow also accepts `pull_request` events, for example a `labeled` trigger
 | Secret | Required | Description |
 |--------|----------|-------------|
 | `OPENROUTER_API_KEY` | Yes | OpenRouter key for every model but Claude. It must belong to the account that holds the `air-*` provider presets (see below). Give it a credit limit: that limit is the hard ceiling on spend |
-| `ANTHROPIC_API_KEY` | Unless `lanes` leaves out `claude` | Anthropic key for the Opus reviewer. Use a workspace with a monthly spend limit |
+| `ANTHROPIC_API_KEY` | Unless `lanes` leaves out both `claude` and `fable` | Anthropic key for the Opus reviewer. Use a workspace with a monthly spend limit |
 
 The calling job must grant `contents: read`, `pull-requests: write` and `actions: read`. Only the final job, which posts the comment, gets `pull-requests: write`; the jobs that run models get read permissions only. `actions: read` lets `continue` download the earlier review.
 
