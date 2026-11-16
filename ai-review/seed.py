@@ -774,7 +774,10 @@ def plan_units(wt: Path, head: str, recs: list[FileRec], cfg: dict, force_single
             nxt[a] = fs
             continue
         def label(ch: list[FileRec]) -> str:
-            first, last = PurePosixPath(ch[0].path).name, PurePosixPath(ch[-1].path).name
+            # paths below the area, not basenames: chunks are disjoint runs of the sorted paths, so
+            # their first paths differ and every chunk gets its own key. Basenames collide
+            # (`{mod.rs .. mod.rs}`) and the later chunk replaced the earlier one in `nxt`.
+            first, last = ch[0].path.removeprefix(a + "/"), ch[-1].path.removeprefix(a + "/")
             return f"{a}/{{{first}}}" if len(ch) == 1 else f"{a}/{{{first} .. {last}}}"
         chunk = []
         for f in sorted(fs, key=lambda f: f.path):
