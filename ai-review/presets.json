@@ -131,33 +131,6 @@
       },
       "updated": "2026-11-11T20:20:08"
     },
-    "moonshotai/kimi-k2.7-code": {
-      "slug": "air-moonshotai-kimi-k2-7-code",
-      "provider": {
-        "order": [
-          "moonshotai"
-        ],
-        "allow_fallbacks": false,
-        "ignore": [
-          "moonshotai/highspeed"
-        ]
-      },
-      "preset_id": "15393d41-24bb-430d-b0db-b241dfbb9ae7",
-      "version": 2,
-      "stored_config": {
-        "model": "moonshotai/kimi-k2.7-code",
-        "provider": {
-          "order": [
-            "moonshotai"
-          ],
-          "ignore": [
-            "moonshotai/highspeed"
-          ],
-          "allow_fallbacks": false
-        }
-      },
-      "updated": "2026-11-11T20:20:10"
-    },
     "moonshotai/kimi-k3.1-pro": {
       "slug": "air-moonshotai-kimi-k3-1-pro",
       "provider": {

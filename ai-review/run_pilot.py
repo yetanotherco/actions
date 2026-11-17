@@ -69,7 +69,6 @@ LANES: dict[str, tuple[str, str]] = {
     "deepseek": ("codex", "deepseek/deepseek-v4-pro-0813"),
     "gemini": ("codex", "google/gemini-4-argon"),
     # optional (select with --lanes)
-    "kimi27": ("codex", "moonshotai/kimi-k2.7-code"),
     "gptpro": ("codex", "openai/gpt-6.1-sol-pro"),
     "glmprime": ("codex", "z-ai/glm-5.3-prime"),
     "inkling": ("codex", "thinkingmachines/inkling"),
