@@ -29,10 +29,12 @@ MAX_EFFECTIVE = 20000
 TEST_WEIGHT = 0.5
 # Chars of diff in the prompt; above it the diff is ranked (larger changes first, low-risk last) and the rest
 # is listed for the reviewers to read with their tools. Whole-function diffs run ~36-38 chars per effective
-# line, so this holds ~6-7k lines whole. Kept there because Codex compacts its context (dropping the diff
-# into a summary) well below the models' 1M windows: GLM did at a 408k-char prompt, GPT at 795k
-# (2026-11-17; Codex uses fallback model metadata for these models). Opus did not compact at 795k.
-DIFF_CAP = 250_000
+# line, so this holds ~15-16k lines whole. It was 250k while Codex, on fallback model metadata, compacted
+# its context (dropping the diff into a summary) at ~245k tokens: GLM did at a 408k-char prompt, GPT at
+# 795k. The model catalog run_pilot.py gives each Codex lane (CODEX_CATALOG_ENTRY) now gives Codex the
+# real window (2026-11-17): 600k chars is about 150-250k tokens, far below the ~890k-token compaction
+# point of the default lanes' 1M windows. Opus did not compact at 795k.
+DIFF_CAP = 600_000
 DELETION_COMPACT_MIN = 15  # deletion-only hunks with fewer removed lines stay in full
 
 LOCKFILE_NAMES = {

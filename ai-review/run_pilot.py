@@ -672,6 +672,7 @@ class Routing:
         write_json(run_dir / "openrouter_endpoints_snapshot.json",
                    {m: [{"tag": e.get("tag"), "provider_name": e.get("provider_name"), "pricing": e.get("pricing"),
                          "status": e.get("status"), "quantization": e.get("quantization"),
+                         "context_length": e.get("context_length"), "max_prompt_tokens": e.get("max_prompt_tokens"),
                          "supported_parameters": e.get("supported_parameters")} for e in eps]
                     for m, eps in self.endpoints.items()})
         self.presets = {}
@@ -799,6 +800,9 @@ class Routing:
                     best = min(eps, key=lambda e: float((e.get("pricing") or {}).get("prompt") or 0))
                 out[mid] = _price_of(best.get("pricing") or {}) | {
                     "context_length": best.get("context_length") or out.get(mid, {}).get("context_length", 0),
+                    # the lowest of the hosts a request can go to (GPT-6.1-sol: 922k of its 1.05M window)
+                    "max_prompt_tokens": min((e["max_prompt_tokens"] for e in eps if e.get("max_prompt_tokens")),
+                                             default=None),
                     "source": f"endpoint {best.get('tag')}"}
         return out
 
@@ -1235,7 +1239,7 @@ class CodexTail:
             if it_t == "error" and "compaction" in str(it.get("message") or "").lower():
                 # Codex replaced the conversation (the diff included) with a summary: later requests are
                 # small again, and the reviewer no longer has the diff in front of it (2026-11-17: GLM at a
-                # 408k-char prompt, GPT at 795k)
+                # 408k-char prompt, GPT at 795k, before the model catalog: see CODEX_CATALOG_ENTRY)
                 self.compactions += 1
                 self.ctx = CODEX_OVERHEAD_TOKENS + 30_000
                 log(f"WARNING {self.label or self.path.parent.name}: Codex compacted the conversation; the diff "
@@ -1383,15 +1387,44 @@ def permissions_toml(read_roots: list[Path]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Codex knows none of the lanes' OpenRouter model strings. On its fallback metadata, 0.142.2 caps the
+# context window at 272k and compacts at 244,800 tokens whatever config.toml says, and compaction
+# replaces the diff with a summary. So every Codex lane gets a one-entry model catalog
+# (model_catalog_json) for the exact model string it sends, with the model's real window (2026-11-17:
+# 0 compactions, GPT up to 284k and GLM up to 345k tokens per request).
+# The entry is Codex 0.142.2's fallback metadata, frozen: its base_instructions, tools, truncation and
+# request fields are the fallback's (request bodies compared byte for byte); only slug, name and window
+# fields are filled per lane. Re-capture it when the Codex version pinned in pr_review_multi.yml changes:
+# run one lane config without model_catalog_json against a local fake Responses endpoint, copy the
+# request's `instructions` into base_instructions, and check that a request with the catalog is
+# identical to one without it.
+CODEX_CATALOG_ENTRY = ROOT / "codex_catalog_entry.json"
+# Compaction at 0.85 of the window, and at most 0.97 of the hosts' max prompt where OpenRouter gives one
+# (GPT-6.1-sol: 922k): room for the request that crosses the limit (one request added at most ~6k tokens).
+CODEX_COMPACT_AT = 0.85
+CODEX_MAX_PROMPT_SHARE = 0.97
+
+
 def codex_home_for(dirpath: Path, model: str, prices: dict, zdotdir: Path | None = None,
-                   read_roots: list[Path] | None = None) -> Path:
+                   read_roots: list[Path] | None = None, sent_model: str | None = None) -> Path:
+    """sent_model: the string passed to `codex exec -m` (with the preset suffix when pinned); the
+    catalog entry is found only under exactly that slug. Defaults to `model`."""
     dirpath.mkdir(parents=True, exist_ok=True)
-    ctx = int(prices.get(base_model(model), {}).get("context_length") or 0)
+    p = prices.get(base_model(model), {})
+    ctx = int(p.get("context_length") or 0)
     meta = ""
     if ctx:
-        # Gives Codex the context size it cannot look up for non-OpenAI models. The
-        # "Model metadata ... not found" warning may still appear; it is recorded.
-        meta = f"model_context_window = {ctx}\nmodel_auto_compact_token_limit = {int(ctx * 0.8)}\n"
+        limit = int(ctx * CODEX_COMPACT_AT)
+        if p.get("max_prompt_tokens"):
+            limit = min(limit, int(p["max_prompt_tokens"] * CODEX_MAX_PROMPT_SHARE))
+        slug = sent_model or model
+        entry = json.loads(CODEX_CATALOG_ENTRY.read_text())
+        entry.update(slug=slug, display_name=slug, context_window=ctx, max_context_window=ctx,
+                     auto_compact_token_limit=limit)
+        write_json(dirpath / "model_catalog.json", {"models": [entry]})
+        # the config's compaction limit wins over the entry's: both get the same value
+        meta = (f"model_context_window = {ctx}\nmodel_auto_compact_token_limit = {limit}\n"
+                f"model_catalog_json = {json.dumps(str(dirpath / 'model_catalog.json'))}\n")
     # json.dumps gives a valid TOML basic string for a path
     # XDG_CONFIG_HOME: git otherwise warns on every command that ~/.config/git/ignore is denied
     shell_set = (f"set = {{ ZDOTDIR = {json.dumps(str(zdotdir))}, XDG_CONFIG_HOME = {json.dumps(str(zdotdir))} }}\n"
@@ -1403,8 +1436,9 @@ sandbox_mode = "read-only"
 project_doc_max_bytes = 0
 web_search = "disabled"
 check_for_update_on_startup = false
-# Without model metadata Codex drops model_reasoning_effort from the request (checked against a
-# local capture stub: `reasoning` was null). This makes it send {{effort, summary}}.
+# On fallback model metadata (which the model catalog entry copies) Codex drops model_reasoning_effort
+# from the request (checked against a local capture stub: `reasoning` was null). This makes it send
+# {{effort, summary}}.
 model_supports_reasoning_summaries = true
 {meta}{permissions_toml(read_roots) if read_roots else ""}
 [history]
@@ -1443,23 +1477,35 @@ def killed_result(res: dict, killed: str) -> None:
     res["killed"] = killed
 
 
-def save_codex_trace(home: Path, dest: Path) -> None:
+def save_codex_trace(home: Path, dest: Path) -> int:
     """Writes the lane's turn-by-turn trace from Codex's session file to `dest`, one JSON object per
     line: {"kind": "reasoning" | "command" | "output" | "message", "text": ...}, then deletes the
     session files (they repeat the whole prompt). Reasoning text is present only for models that
-    return it (open models via OpenRouter); OpenAI and Anthropic models return none or a summary."""
+    return it (open models via OpenRouter); OpenAI and Anthropic models return none or a summary.
+    Also writes requests.jsonl next to `dest`: per request its token usage and Codex's effective
+    context window ("window"), and {"kind": "compacted"} where Codex compacted. Returns the number
+    of compactions."""
     files = sorted((home / "sessions").rglob("*.jsonl")) if (home / "sessions").is_dir() else []
     rows: list[dict] = []
+    reqs: list[dict] = []
     for fpath in files:
         for line in fpath.read_text(errors="replace").splitlines():
             try:
                 e = json.loads(line)
             except ValueError:
                 continue
-            if e.get("type") != "response_item":
-                continue
             p = e.get("payload")
-            if not isinstance(p, dict):
+            if e.get("type") == "event_msg" and isinstance(p, dict):
+                info = p.get("info") if p.get("type") == "token_count" else None
+                if isinstance(info, dict):
+                    row = {"kind": "request", **(info.get("last_token_usage") or {}),
+                           "total_input": (info.get("total_token_usage") or {}).get("input_tokens"),
+                           "window": info.get("model_context_window")}
+                    if not reqs or reqs[-1].get("total_input") != row["total_input"]:   # Codex repeats it
+                        reqs.append(row)
+                elif p.get("type") == "context_compacted":
+                    reqs.append({"kind": "compacted"})
+            if e.get("type") != "response_item" or not isinstance(p, dict):
                 continue
             t = p.get("type")
             if t == "reasoning":
@@ -1483,7 +1529,10 @@ def save_codex_trace(home: Path, dest: Path) -> None:
             if isinstance(r.get("text"), str) and len(r["text"]) > 20_000:
                 r["text"] = r["text"][:20_000] + " [truncated]"
         write_text(dest, "".join(json.dumps(r) + "\n" for r in rows[:5000]))
+    if reqs:
+        write_text(dest.with_name("requests.jsonl"), "".join(json.dumps(r) + "\n" for r in reqs))
     shutil.rmtree(home / "sessions", ignore_errors=True)
+    return sum(r["kind"] == "compacted" for r in reqs)
 
 
 def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: Path, wt: Path,
@@ -1499,7 +1548,8 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
         write_zsh_gate(zdotdir, flag)
     else:
         zdotdir.mkdir(parents=True, exist_ok=True)
-    home = codex_home_for(out_dir / "codex_home", model, prices, zdotdir if soft else None, [wt, zdotdir])
+    home = codex_home_for(out_dir / "codex_home", model, prices, zdotdir if soft else None, [wt, zdotdir],
+                          sent_model)
     env = base_env()
     env.update({"CODEX_HOME": str(home), "OPENROUTER_API_KEY": key})
     last = out_dir / "last_message.txt"
@@ -1520,8 +1570,9 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
     rc, wall, timed_out, killed = _popen_with_timeout(cmd, wt, env, prompt, out_dir / "events.jsonl",
                                                       out_dir / "stderr.txt", timeout, tail, label)
     del env
+    compacted = 0
     try:
-        save_codex_trace(home, out_dir / "trace.jsonl")
+        compacted = save_codex_trace(home, out_dir / "trace.jsonl")
     except Exception as e:  # noqa: BLE001 - a trace problem must not cost a finished, paid lane
         log(f"{label}: trace extraction failed ({type(e).__name__}: {e})")
     res: dict[str, Any] = {"lane": name, "harness": "codex", "model": model, "model_sent": sent_model,
@@ -1564,9 +1615,13 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
                 "errors": errors})
     if soft:
         res["soft_budget"] = soft
-    if tail.compactions:
-        res["compactions"] = tail.compactions
-        res["warnings"].append(f"Codex compacted the conversation {tail.compactions} time(s): the diff was "
+    if compacted and not tail.compactions:   # in the session file, not in the event stream (no live warning)
+        log(f"WARNING {label or name}: Codex compacted the conversation {compacted} time(s); the diff "
+            f"is now only in its summary (see {out_dir / 'requests.jsonl'})")
+    compactions = max(tail.compactions, compacted)
+    if compactions:
+        res["compactions"] = compactions
+        res["warnings"].append(f"Codex compacted the conversation {compactions} time(s): the diff was "
                                "replaced by a summary")
     if tail.gate:
         res["budget_stop"] = {**tail.gate, "refused_after": tail.refused}
@@ -4103,7 +4158,12 @@ def main() -> None:
         for u in units[:1]:
             for x in u.lanes:
                 if LANES[x][0] == "codex":
-                    codex_home_for(run_dir / "units" / u.uid / "agentic" / x / "codex_home", LANES[x][1], prices)
+                    try:
+                        sent = routing.harness_model(LANES[x][1])[0]
+                    except RuntimeError:   # --pin presets without a preset: the lane itself would fail
+                        sent = LANES[x][1]
+                    codex_home_for(run_dir / "units" / u.uid / "agentic" / x / "codex_home", LANES[x][1], hprices,
+                                   sent_model=sent)
                 else:
                     write_json(run_dir / "units" / u.uid / "agentic" / x / "settings.json", claude_settings(wt))
         print(report_md)
