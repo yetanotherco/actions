@@ -1298,6 +1298,19 @@ class CodexTail:
         return self._check_soft(est)   # the soft budget always uses the estimate (exact arrives only at the end)
 
 
+# The gate's files must be readable inside every lane's sandbox, so they live outside every read-denied
+# path. They used to sit in the lane's own folder under the runs dir, given back with a more specific
+# "read" entry: macOS honours that, but Codex's Linux sandbox does not, and in CI (where the runs dir is
+# denied) the shell could not read the gate, so no command was ever refused (yetanotherco/actions#24,
+# 2026-11-17: DeepSeek ran 50 commands past its soft stop until the 35-minute timeout).
+GATE_ROOT = Path(os.path.expanduser("~/.ai-review-gates"))
+
+
+def gate_dir_for(out_dir: Path) -> Path:
+    """A lane's private gate folder, outside the runs dir."""
+    return GATE_ROOT / hashlib.sha256(str(out_dir.resolve()).encode()).hexdigest()[:20]
+
+
 def write_zsh_gate(zdotdir: Path, flag: Path) -> None:
     """The soft-budget gate. Codex 0.142 runs every command as `/bin/zsh -lc '<cmd>'`, and zsh
     reads $ZDOTDIR/.zshenv before anything else, so once the runner creates `flag` every command
@@ -1478,8 +1491,8 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
               label: str = "", estimate_cap: bool = True, soft: dict | None = None,
               effort: str = "high") -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
-    # the gate's files live in zdotdir, the one lane folder the read-deny profile lets commands read
-    zdotdir = out_dir / "zdotdir"
+    # the gate's files live outside the runs dir (see GATE_ROOT)
+    zdotdir = gate_dir_for(out_dir)
     flag = zdotdir / "budget_exhausted"
     flag.unlink(missing_ok=True)   # a retry reuses out_dir: never start with the gate closed
     if soft:
@@ -4123,6 +4136,26 @@ def make_undumpable() -> None:
         log(f"WARNING: prctl(PR_SET_DUMPABLE, 0) failed: {e}")
 
 
+def sandbox_gate_probe(home: Path, env: dict, wt: Path, run_dir: Path) -> str:
+    """"" when a closed soft-budget gate refuses a zsh command inside the lane sandbox, else what went wrong."""
+    if not shutil.which("zsh"):
+        return "zsh is not installed, so the Codex lanes have no soft-budget gate"
+    gate = gate_dir_for(run_dir / "sandbox_check" / "gate")
+    write_zsh_gate(gate, gate / "budget_exhausted")
+    (gate / "budget_exhausted").write_text("GATE-PROBE-REFUSED\n")
+    try:
+        r = subprocess.run(["codex", "sandbox", "-P", "review", "-C", str(wt), "--", "env", "-i",
+                            "PATH=/usr/bin:/bin", f"ZDOTDIR={gate}", "zsh", "-lc", "echo GATE-PROBE-RAN"],
+                           cwd=wt, env=env, capture_output=True, text=True, timeout=120)
+        out = r.stdout + r.stderr
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"could not run the gate probe: {e}"
+    if "GATE-PROBE-REFUSED" in out and "GATE-PROBE-RAN" not in out:
+        return ""
+    return ("the soft-budget gate does not refuse commands inside the sandbox, so Codex lanes run on until "
+            "their hard cap or timeout: " + out.strip()[-200:])
+
+
 def sandbox_selfcheck(args, wt: Path, run_dir: Path, prices: dict) -> None:
     """Before any paid call (Linux, --sandbox-check warn|strict): run one command in the Codex lane
     sandbox, with no model, and check that (1) it runs and can read the checkout and (2) it cannot read
@@ -4155,6 +4188,7 @@ def sandbox_selfcheck(args, wt: Path, run_dir: Path, prices: dict) -> None:
     except (OSError, subprocess.TimeoutExpired) as e:
         out = f"could not run codex sandbox: {e}"
     m = re.search(r"CANARY_COUNT=(\d+)", out)
+    gate_note = sandbox_gate_probe(home, env, wt, run_dir)
     problems = []
     if "CHECKOUT_READABLE" not in out or not m:
         problems.append("a sandboxed command could not read the checkout (the Codex sandbox does not work here): "
@@ -4165,7 +4199,12 @@ def sandbox_selfcheck(args, wt: Path, run_dir: Path, prices: dict) -> None:
         problems.append(f"a sandboxed command can read other processes' environments (/proc/<pid>/environ, "
                         f"{m.group(1)} process(es) with the canary): a prompt-injected Codex lane could read "
                         "the OpenRouter key")
-    write_json(run_dir / "sandbox_check.json", {"problems": problems, "mode": args.sandbox_check})
+    write_json(run_dir / "sandbox_check.json", {"problems": problems, "mode": args.sandbox_check,
+                                                "budget_gate": gate_note or "ok"})
+    if gate_note:   # a budget problem, not a security one: the hard caps still apply
+        log(f"WARNING sandbox check: {gate_note}")
+    else:
+        log("sandbox check: the soft-budget gate refuses commands inside the sandbox")
     if not problems:
         log("sandbox check: lane commands run, read the checkout, and cannot read other processes' environments")
         return
