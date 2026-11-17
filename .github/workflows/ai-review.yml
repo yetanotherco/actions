@@ -1,28 +1,42 @@
 name: AI Code Review
 
 # Reviews this repository's PRs with its own reusable workflows, called by
-# local reference: comment triggers run the copies on the default branch.
-# Other repositories pin a commit SHA.
+# local reference: comment triggers run the copies on the default branch, the
+# label trigger runs the PR's own copies (so a PR can review itself with its
+# changes). Other repositories pin a commit SHA.
 #
-# Reviews run only on demand. Comment `/review` on a PR for the multi-model
-# review (several models, findings checked by a judge, one comment); add
-# `continue` to finish a budget-limited review or `budget=N` to raise its
+# Reviews run only on demand. Comment `/review` on a PR, or add a label
+# starting with `ai-review`, for the multi-model review (several models,
+# findings checked by a judge, one comment); add `continue` to a `/review`
+# comment to finish a budget-limited review or `budget=N` to raise its
 # budget. Comment `/claude`, `/codex`, `/kimi`, `/deepseek`, `/grok` or
 # `/gemini` for a single model's review.
 
 on:
   issue_comment:
     types: [created]
+  pull_request:
+    types: [labeled]
 
 permissions: {}
 
 jobs:
   multi-review:
+    # A label needs triage or write access to add; fork PRs are refused here and again in the workflow.
     if: >
-      github.event.issue.pull_request &&
-      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
-    # A local reference: this repository's own copy at the commit the event runs (main for comments).
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+        (github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
+      ) ||
+      (
+        github.event_name == 'pull_request' &&
+        startsWith(github.event.label.name, 'ai-review') &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      )
+    # A local reference: this repository's own copy at the commit the event runs (main for comments,
+    # the PR's merge commit for the label).
     uses: ./.github/workflows/pr_review_multi.yml
     permissions:
       contents: read
