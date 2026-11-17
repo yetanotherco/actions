@@ -90,11 +90,28 @@ class RequestsLog(unittest.TestCase):
             (home / "sessions" / "2026").mkdir(parents=True)
             out.mkdir()
             (home / "sessions" / "2026" / "s.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
-            self.assertEqual(rp.save_codex_trace(home, out / "trace.jsonl"), 1)
+            self.assertEqual(rp.save_codex_trace(home, out / "trace.jsonl"),
+                             {"compactions": 1, "max_context": 300_000, "window": 996_147})
             rows = [json.loads(x) for x in (out / "requests.jsonl").read_text().splitlines()]
             self.assertFalse((home / "sessions").exists())
         self.assertEqual([r["kind"] for r in rows], ["request", "compacted", "request"])
         self.assertEqual((rows[0]["input_tokens"], rows[0]["window"], rows[2]["total_input"]), (300_000, 996_147, 302_000))
+
+
+class ContextReport(unittest.TestCase):
+    def test_section_and_summary(self):
+        ctx = {"lane_rows": [{"unit": "u01", "lane": "gpt", "compactions": 0, "max_context": 284_000,
+                              "context_window": 996_147},
+                             {"unit": "u01", "lane": "glm", "compactions": 2, "max_context": 345_000,
+                              "context_window": 0}],
+               "aux_rows": [{"unit": "-", "lane": "merge"}]}
+        out = "\n".join(rp.context_lines(ctx))
+        self.assertIn("Compactions: 2 in 1 of 2 agentic lane(s)", out)
+        self.assertIn("| u01 | gpt | 284,000 | 996,147 | 29% | 0 |", out)
+        self.assertIn("| u01 | glm | 345,000 | 0 | - | 2 |", out)
+        self.assertNotIn("merge", out)
+        self.assertEqual(rp.context_summary(ctx), "2 compaction(s); largest request 345,000 tokens (u01/glm)")
+        self.assertEqual(rp.context_lines({"lane_rows": [], "aux_rows": []}), [])
 
 
 if __name__ == "__main__":

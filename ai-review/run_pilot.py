@@ -1476,14 +1476,14 @@ def killed_result(res: dict, killed: str) -> None:
     res["killed"] = killed
 
 
-def save_codex_trace(home: Path, dest: Path) -> int:
+def save_codex_trace(home: Path, dest: Path) -> dict:
     """Writes the lane's turn-by-turn trace from Codex's session file to `dest`, one JSON object per
     line: {"kind": "reasoning" | "command" | "output" | "message", "text": ...}, then deletes the
     session files (they repeat the whole prompt). Reasoning text is present only for models that
     return it (open models via OpenRouter); OpenAI and Anthropic models return none or a summary.
     Also writes requests.jsonl next to `dest`: per request its token usage and Codex's effective
-    context window ("window"), and {"kind": "compacted"} where Codex compacted. Returns the number
-    of compactions."""
+    context window ("window"), and {"kind": "compacted"} where Codex compacted. Returns
+    {"compactions", "max_context" (largest input of one request, tokens), "window"}."""
     files = sorted((home / "sessions").rglob("*.jsonl")) if (home / "sessions").is_dir() else []
     rows: list[dict] = []
     reqs: list[dict] = []
@@ -1531,7 +1531,10 @@ def save_codex_trace(home: Path, dest: Path) -> int:
     if reqs:
         write_text(dest.with_name("requests.jsonl"), "".join(json.dumps(r) + "\n" for r in reqs))
     shutil.rmtree(home / "sessions", ignore_errors=True)
-    return sum(r["kind"] == "compacted" for r in reqs)
+    peaks = [int(r.get("input_tokens") or 0) for r in reqs if r["kind"] == "request"]
+    windows = [int(r["window"]) for r in reqs if r.get("window")]
+    return {"compactions": sum(r["kind"] == "compacted" for r in reqs), "max_context": max(peaks, default=0),
+            "window": max(windows, default=0)}
 
 
 def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: Path, wt: Path,
@@ -1569,9 +1572,9 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
     rc, wall, timed_out, killed = _popen_with_timeout(cmd, wt, env, prompt, out_dir / "events.jsonl",
                                                       out_dir / "stderr.txt", timeout, tail, label)
     del env
-    compacted = 0
+    ctxinfo: dict = {}
     try:
-        compacted = save_codex_trace(home, out_dir / "trace.jsonl")
+        ctxinfo = save_codex_trace(home, out_dir / "trace.jsonl")
     except Exception as e:  # noqa: BLE001 - a trace problem must not cost a finished, paid lane
         log(f"{label}: trace extraction failed ({type(e).__name__}: {e})")
     res: dict[str, Any] = {"lane": name, "harness": "codex", "model": model, "model_sent": sent_model,
@@ -1614,12 +1617,16 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
                 "errors": errors})
     if soft:
         res["soft_budget"] = soft
+    compacted = ctxinfo.get("compactions", 0)
     if compacted and not tail.compactions:   # in the session file, not in the event stream (no live warning)
         log(f"WARNING {label or name}: Codex compacted the conversation {compacted} time(s); the diff "
             f"is now only in its summary (see {out_dir / 'requests.jsonl'})")
     compactions = max(tail.compactions, compacted)
+    # for tuning: how close each lane came to its window, and whether it compacted (see context_lines)
+    res["compactions"] = compactions
+    res["max_context"] = ctxinfo.get("max_context", 0)
+    res["context_window"] = ctxinfo.get("window") or int(prices.get(base_model(model), {}).get("context_length") or 0)
     if compactions:
-        res["compactions"] = compactions
         res["warnings"].append(f"Codex compacted the conversation {compactions} time(s): the diff was "
                                "replaced by a summary")
     if tail.gate:
@@ -1860,6 +1867,7 @@ def run_claude(name: str, model: str, sent_model: str, small_model: str, prompt:
                                                             else "subscription" if auth_token else "openrouter"),
                            "static_via_cli": static}
     tool_calls, tool_names, msg_ids, result, init = 0, {}, [], None, None
+    compactions, max_context = 0, 0
     for line in (out_dir / "events.jsonl").read_text(errors="replace").splitlines():
         try:
             e = json.loads(line)
@@ -1867,8 +1875,13 @@ def run_claude(name: str, model: str, sent_model: str, small_model: str, prompt:
             continue
         if e.get("type") == "system" and e.get("subtype") == "init":
             init = e
+        elif e.get("type") == "system" and e.get("subtype") == "compact_boundary":
+            compactions += 1
         elif e.get("type") == "assistant":
             m = e.get("message") or {}
+            u = m.get("usage") or {}
+            max_context = max(max_context, int(u.get("input_tokens") or 0) + int(u.get("cache_read_input_tokens") or 0)
+                              + int(u.get("cache_creation_input_tokens") or 0))
             if m.get("id") and m["id"] not in msg_ids:
                 msg_ids.append(m["id"])
             for c in m.get("content") or []:
@@ -1880,6 +1893,10 @@ def run_claude(name: str, model: str, sent_model: str, small_model: str, prompt:
             result = e
     res["tool_calls"] = tool_calls
     res["tool_names"] = tool_names
+    res["compactions"], res["max_context"] = compactions, max_context
+    res["context_window"] = int(prices.get(base_model(model), {}).get("context_length") or 0)
+    if compactions:
+        log(f"WARNING {label or name}: Claude Code compacted the conversation {compactions} time(s)")
     res["message_ids"] = msg_ids
     if init:
         res["init"] = {k: init.get(k) for k in ("model", "tools", "permissionMode", "apiKeySource",
@@ -3565,6 +3582,33 @@ def write_too_big(args, plan: dict, tag: str) -> None:
     write_text(report.with_suffix(".comment.md"), text)
 
 
+def context_lines(ctx: dict) -> list[str]:
+    """Report section for tuning prompt size: per agentic lane, its largest single request (tokens), the
+    window it ran with, and how many times its harness compacted the conversation (which drops the diff
+    into a summary). Not in the PR comment."""
+    rows = [r for r in ctx.get("lane_rows", []) + ctx.get("aux_rows", []) if "compactions" in r]
+    if not rows:
+        return []
+    n = sum(r.get("compactions") or 0 for r in rows)
+    out = ["## Context", "", f"Compactions: {n} in {sum(1 for r in rows if r.get('compactions'))} of {len(rows)} "
+           "agentic lane(s). Largest request per lane:", "",
+           "| unit | lane | largest request (tokens) | window | share | compactions |", "|---|---|---|---|---|---|"]
+    for r in rows:
+        w, mx = r.get("context_window") or 0, r.get("max_context") or 0
+        out.append(f"| {r.get('unit', '-')} | {r.get('lane')} | {mx:,} | {w:,} | "
+                   f"{f'{mx / w:.0%}' if w else '-'} | {r.get('compactions') or 0} |")
+    return out + [""]
+
+
+def context_summary(ctx: dict) -> str:
+    rows = [r for r in ctx.get("lane_rows", []) + ctx.get("aux_rows", []) if "compactions" in r]
+    if not rows:
+        return "no agentic lane"
+    top = max(rows, key=lambda r: r.get("max_context") or 0)
+    return (f"{sum(r.get('compactions') or 0 for r in rows)} compaction(s); largest request "
+            f"{top.get('max_context') or 0:,} tokens ({top.get('unit', '-')}/{top.get('lane')})")
+
+
 def write_report(path: Path, ctx: dict) -> None:
     # The PR comment first and on its own: a failure in the long report below must not cost the comment.
     try:
@@ -3628,6 +3672,7 @@ def write_report(path: Path, ctx: dict) -> None:
     for r in ctx["aux_rows"]:
         lines.append(v2_lane_row(r, "-"))
     lines.append("")
+    lines += context_lines(ctx)
     lines.append(f"Merge (all modes and units together): {ctx['merge_info']['n_in']} raw findings → "
                  f"{ctx['merge_info']['n_out']} after dedup ({ctx['merge_info']['candidate_groups']} candidate groups "
                  f"sent to the merge model).")
@@ -5024,6 +5069,7 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
     except Exception as e:  # noqa: BLE001
         log(f"WARNING: report failed ({e}); summary.json and the ledger are written")
     computed = sum(r.get("computed_cost") or 0 for r in lane_rows + aux_rows)
+    log(f"context: {context_summary(ctx)}")
     log(f"run {status} | billed ${billing['delta']} | computed ${computed:.4f} | report {report}")
     _EXACT_SECRETS.clear()
     if crash is not None:
