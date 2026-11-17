@@ -4,12 +4,11 @@
 # (Opus, GPT, Kimi, GLM and DeepSeek by default). Their findings are merged, a judge model checks the
 # findings against the code, and one comment is posted: a table of findings to check, collapsed
 # sections for duplicates, pre-existing bugs, dismissed findings and housekeeping notes (stale docs,
-# missing tests), and what the review cost. Large PRs are split into parts and reviewed in path
-# order, low-risk parts last, until the budget or the time runs out; the comment lists any part left
-# unreviewed.
+# missing tests), and what the review cost. One review covers the whole PR; a PR over 20,000 effective
+# changed lines is not reviewed, and the comment asks for it to be split.
 #
 # Callers comment `<command>` on a PR (or add a label), optionally followed by:
-#   continue    review only the parts an earlier, budget-limited review of the same commit skipped
+#   continue    finish an earlier review of the same commit that stopped at its budget or time limit
 #   budget=N    use N USD for this review (at most `max_budget`)
 #
 # Usage: see "Multi-model PR Review" in the README.
@@ -25,7 +24,7 @@ on:
         type: string
         default: '/review'
       pr_budget:
-        description: 'USD limit for one review. 0 = automatic: $20 for a PR reviewed in one part, $50 for a PR split into parts'
+        description: 'USD limit for one review. 0 = the default, $30'
         required: false
         type: number
         default: 0
@@ -65,8 +64,8 @@ on:
 jobs:
   review:
     runs-on: ubuntu-24.04
-    # The runner stops starting new parts of a split PR after 240 minutes (--deadline-min), so a
-    # review ends, with its report, inside this limit.
+    # The runner skips the judge if the reviewers end more than 285 minutes after the start
+    # (--deadline-min 240), so a review ends, with its report, inside this limit.
     timeout-minutes: 330
     # One review per PR at a time; a second request waits instead of killing a paid run.
     concurrency:

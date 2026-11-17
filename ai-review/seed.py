@@ -8,7 +8,8 @@ From a checkout at the PR head and the merge-base it builds a *plan*:
   - test files and the test functions they add / change / remove (tests are not put in the
     seed diff; the agentic lanes can read them in the checkout);
   - the effective size (code lines + 0.5 x test lines, after trimming) and the size class;
-  - review units for large PRs (split by package / area, low-risk units marked).
+  - one review unit for the whole PR (marked low-risk when all its code matches `low_risk`); a PR over
+    MAX_EFFECTIVE lines is not reviewed.
 Per unit it renders the seed diff (whole-function context, deletion-only hunks compacted)
 and the plain `-U3` diff used by the static-diff comparison mode.
 """
@@ -20,16 +21,18 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-# 2026-11-12 (from a sizing analysis): was 20000, set before units existed. Above ~2.5-4k
-# effective lines the diff no longer fits DIFF_CAP and the models do not explore more to make up for it.
-# 1-3% of PRs are bigger (ethrex / lambda_vm, last 12 months).
-NORMAL_MAX = 4000       # effective lines: up to this, one unit; above it, the PR is split into units
-LARGE_MAX = 20000       # "large" up to this, "huge" above (a label only: both split, both under --pr-budget)
-UNIT_TARGET = 2500      # small areas are packed together up to about this size
-UNIT_MAX = 4000         # an area bigger than this is split one directory level deeper, then by files
-UNIT_DEPTH = 2          # outside a package, an area is the first UNIT_DEPTH path components
+# One review per PR, up to MAX_EFFECTIVE lines; a bigger PR is not reviewed and the comment asks for it
+# to be split (2026-11-17). On propamm #1 (one run per arm) a single 10k- or 21k-line review found the
+# critical and the same real highs as four ~2.5k-line parts, at about half the cost; the split parts
+# found only extra low-severity issues. Outside lambda_vm, almost no PR is over 10k (last 12 months).
+MAX_EFFECTIVE = 20000
 TEST_WEIGHT = 0.5
-DIFF_CAP = 250_000      # chars of diff in the prompt (was 150k: 13-25% of large-PR units lost files)
+# Chars of diff in the prompt; above it the diff is ranked (larger changes first, low-risk last) and the rest
+# is listed for the reviewers to read with their tools. Whole-function diffs run ~36-38 chars per effective
+# line, so this holds ~6-7k lines whole. Kept there because Codex compacts its context (dropping the diff
+# into a summary) well below the models' 1M windows: GLM did at a 408k-char prompt, GPT at 795k
+# (2026-11-17; Codex uses fallback model metadata for these models). Opus did not compact at 795k.
+DIFF_CAP = 250_000
 DELETION_COMPACT_MIN = 15  # deletion-only hunks with fewer removed lines stay in full
 
 LOCKFILE_NAMES = {
@@ -53,7 +56,6 @@ TEST_GLOBS = [
     "**/*_test.py", "**/conftest.py", "**/*.t.sol", "**/*.test.ts", "**/*.test.tsx",
     "**/*.test.js", "**/*.test.jsx", "**/*.spec.ts", "**/*.spec.js",
 ]
-MANIFESTS = {"Cargo.toml", "package.json", "foundry.toml", "go.mod", "pyproject.toml", "setup.py"}
 
 # Files where a whitespace-only change can change what they do (Python indentation, shell word
 # splitting, YAML nesting, Makefile recipes): their counts and diffs keep whitespace. Every other
@@ -659,8 +661,8 @@ def _rank_key(r: FileRec, cfg: dict) -> tuple:
 
 def _ranked_diff(wt: Path, base: list[str], mb: str, head: str, code: list[FileRec], tr: dict,
                  attrs: Path, cap: int, cfg: dict) -> tuple[str, dict[str, int], list[str]]:
-    """Per-file diffs, larger changes first and low-risk files last, until `cap`: -W, else -U20, else -U3;
-    the rest listed."""
+    """Per-file diffs, larger changes first and low-risk files last, until `cap`: -W, else -U20, else -U3,
+    else the -U3 diff cut where the room ends; the rest listed."""
     parts: list[str] = []
     saved_all: dict[str, int] = {}
     omitted: list[str] = []
@@ -674,7 +676,16 @@ def _ranked_diff(wt: Path, base: list[str], mb: str, head: str, code: list[FileR
                 parts.append(d); used += len(d); saved_all.update(saved); placed = True
                 break
         if not placed:
-            omitted.append(r.path)
+            # too big even at -U3: show as much of it as fits (`d` is its -U3 diff) rather than nothing
+            room = cap - used
+            if room > 10_000 and d:
+                keep = d[: room - 300]
+                keep = keep[: keep.rfind("\n") + 1]
+                note = (f"[... the diff of {r.path} is cut here: {len(d) - len(keep):,} more chars; "
+                        f"read the rest with your tools]\n")
+                parts.append(keep + note); used += len(keep) + len(note); saved_all.update(saved)
+            else:
+                omitted.append(r.path)
     diff = "".join(parts)
     if omitted:
         shown = ", ".join(omitted[:200]) + (" ..." if len(omitted) > 200 else "")
@@ -738,165 +749,121 @@ def changed_symbols(wt: Path, mb: str, head: str, recs: list[FileRec], attrs: Pa
 # units
 
 
-def package_roots(wt: Path, head: str) -> list[str]:
-    tree = git(wt, "ls-tree", "-r", "--name-only", head).splitlines()
-    roots = set()
-    for p in tree:
-        pp = PurePosixPath(p)
-        if pp.name in MANIFESTS and str(pp.parent) != ".":
-            roots.add(str(pp.parent))
-    return sorted(roots, key=lambda s: (-s.count("/"), s))
-
-
-def _area(path: str, roots: list[str], depth: int) -> str:
-    for r in roots:  # deepest first
-        if path.startswith(r + "/"):
-            return r
-    parts = PurePosixPath(path).parts
-    if len(parts) == 1:
-        return "(root)"
-    return "/".join(parts[: min(depth, len(parts) - 1)])
-
-
-def _subarea(path: str, area: str) -> str:
-    if area == "(root)":
-        return area
-    rest = PurePosixPath(path[len(area) + 1:]).parts
-    return area if len(rest) <= 1 else f"{area}/{rest[0]}"
-
-
 def size_class(effective: float) -> str:
-    return "normal" if effective <= NORMAL_MAX else ("large" if effective <= LARGE_MAX else "huge")
+    return "normal" if effective <= MAX_EFFECTIVE else "too big"
 
 
-def plan_units(wt: Path, head: str, recs: list[FileRec], cfg: dict, force_single: bool = False) -> list[Unit]:
+def plan_units(recs: list[FileRec], cfg: dict) -> list[Unit]:
+    """One unit with every code and test file of the PR (docs listed with it). It is low-risk only if
+    every code file matches a config `low_risk` glob."""
     reviewable = [r for r in recs if r.kind in ("code", "test")]
-    eff_total = sum(r.effective for r in reviewable)
-
-    def low(files: list[FileRec]) -> bool:
-        code = [r for r in files if r.kind == "code"]
-        return bool(code) and all(is_low_risk(r.path, cfg) for r in code)
-
-    def mk(uid: str, name: str, files: list[FileRec]) -> Unit:
-        return Unit(uid=uid, name=name, files=[r.path for r in files], effective=sum(r.effective for r in files),
-                    code_files=sum(r.kind == "code" for r in files),
-                    test_files=sum(r.kind == "test" for r in files), low_risk=low(files))
-
-    if force_single or size_class(eff_total) == "normal":
-        u = mk("u01", "whole PR", reviewable)
-        for r in reviewable:
-            r.unit = u.uid
-        u.docs_files = [r.path for r in recs if r.kind == "docs"]
-        return [u]
-
-    depth = UNIT_DEPTH
-    roots = package_roots(wt, head)
     code = [r for r in reviewable if r.kind == "code"]
-    groups: dict[str, list[FileRec]] = {}
-    for r in code:
-        groups.setdefault(_area(r.path, roots, depth), []).append(r)
-    # split oversize areas one level deeper, up to 3 times
-    for _ in range(3):
-        nxt: dict[str, list[FileRec]] = {}
-        for a, fs in groups.items():
-            if sum(f.effective for f in fs) > UNIT_MAX and a != "(root)":
-                for f in fs:
-                    nxt.setdefault(_subarea(f.path, a), []).append(f)
-            else:
-                nxt.setdefault(a, []).extend(fs)
-        if nxt.keys() == groups.keys():
-            break
-        groups = nxt
-    # still too big (many files directly in one directory): chunk by files in path order
-    nxt = {}
-    for a, fs in groups.items():
-        if sum(f.effective for f in fs) <= UNIT_MAX or len(fs) == 1:
-            nxt[a] = fs
-            continue
-        def label(ch: list[FileRec]) -> str:
-            # paths below the area, not basenames: chunks are disjoint runs of the sorted paths, so
-            # their first paths differ and every chunk gets its own key. Basenames collide
-            # (`{mod.rs .. mod.rs}`) and the later chunk replaced the earlier one in `nxt`.
-            # "(root)" holds top-level files: keep a `(root)/` directory's prefix, or `(root)/z.rs`
-            # and `z.rs` would get the same key
-            pre = "" if a == "(root)" else a + "/"
-            first, last = ch[0].path.removeprefix(pre), ch[-1].path.removeprefix(pre)
-            return f"{a}/{{{first}}}" if len(ch) == 1 else f"{a}/{{{first} .. {last}}}"
-        chunk = []
-        for f in sorted(fs, key=lambda f: f.path):
-            if chunk and sum(c.effective for c in chunk) + f.effective > UNIT_TARGET:
-                nxt[label(chunk)] = chunk
-                chunk = []
-            chunk.append(f)
-        if chunk:
-            nxt[label(chunk)] = chunk
-    groups = nxt
-    # pack small areas: same top-level directory, and low-risk areas apart from the rest, in path order
-    areas = sorted(groups)
-    packed: list[tuple[str, list[FileRec]]] = []
-    bins: dict[tuple[str, bool], tuple[list[str], list[FileRec]]] = {}
-
-    for a in areas:
-        fs = groups[a]
-        eff = sum(f.effective for f in fs)
-        if eff >= UNIT_TARGET * 0.5:
-            packed.append((a, fs))
-            continue
-        k = (a.split("/")[0], low(fs))
-        names, cur = bins.get(k, ([], []))
-        if cur and sum(f.effective for f in cur) + eff > UNIT_TARGET:
-            packed.append((" + ".join(names), cur))
-            names, cur = [], []
-        bins[k] = (names + [a], cur + fs)
-    for names, cur in bins.values():
-        if cur:
-            packed.append((" + ".join(names) if len(names) <= 4 else f"{names[0]} + {len(names) - 1} more areas", cur))
-    packed.sort(key=lambda x: x[0])
-    units = [mk(f"u{i + 1:02d}", name, fs) for i, (name, fs) in enumerate(packed)]
-
-    # tests and docs go with the unit that shares the longest directory prefix (else none)
-    by_uid = {u.uid: u for u in units}
-    code_files = {u.uid: list(u.files) for u in units}
+    u = Unit(uid="u01", name="whole PR", files=[r.path for r in reviewable],
+             effective=sum(r.effective for r in reviewable), code_files=len(code),
+             test_files=len(reviewable) - len(code),
+             low_risk=bool(code) and all(is_low_risk(r.path, cfg) for r in code))
     for r in reviewable:
-        if r.kind == "test":
-            u = best_unit_from(r.path, units, code_files)
-            if u is None:
-                u = by_uid.setdefault("u00", Unit(uid="u00", name="tests without code in this PR", files=[],
-                                                   effective=0.0))
-            u.files.append(r.path)
-            u.test_files += 1
-            u.effective += r.effective
-    for r in recs:
-        if r.kind == "docs":
-            u = best_unit_from(r.path, units, code_files)
-            if u is not None:
-                u.docs_files.append(r.path)
-    units = sorted(by_uid.values(), key=lambda u: u.uid)
-    for u in units:
-        for p in u.files:
-            for r in recs:
-                if r.path == p:
-                    r.unit = u.uid
-    return units
+        r.unit = u.uid
+    u.docs_files = [r.path for r in recs if r.kind == "docs"]
+    return [u]
 
 
-def _common_dir(a: str, b: str) -> str:
-    pa, pb = PurePosixPath(a).parts[:-1], PurePosixPath(b).parts[:-1]
-    n = 0
-    while n < min(len(pa), len(pb)) and pa[n] == pb[n]:
-        n += 1
-    return "/".join(pa[:n])
+# --------------------------------------------------------------------------------------
+# malicious-code check: code aimed at the people and machines that build, test or open the repository
+# (2026-11-17). The finders do not see test diffs, and nobody reviews lockfiles, so this looks at what
+# runs on a developer's machine or in CI by itself: tests, build and install scripts, hooks, editor
+# tasks, dependency sources.
+
+DEV_EXEC_GLOBS = [
+    "**/package.json", "**/.npmrc", "**/.yarnrc*", "**/Makefile", "**/makefile", "**/*.mk", "**/justfile",
+    "**/Justfile", "**/build.rs", "**/conftest.py", "**/setup.py", "**/setup.cfg", "**/pyproject.toml",
+    "**/test_helper.exs", "**/mix.exs", "**/foundry.toml", "**/Cargo.toml", "**/.cargo/config*", "**/.vscode/**",
+    "**/.devcontainer/**", "**/.husky/**", "**/.githooks/**", "**/lefthook.y*ml", "**/.pre-commit-config.yaml",
+    "**/.envrc", "**/.github/workflows/**", "**/.github/actions/**", "**/scripts/**", "**/*.sh",
+]
+# (name, pattern, where): "all" = any changed file, "dev" = tests and DEV_EXEC_GLOBS files only. A hit is a
+# pointer for the model, not a verdict: most are harmless.
+MAL_PATTERNS = [
+    ("hidden unicode", re.compile("[‪-‮⁦-⁩​-‍⁠﻿]"), "all"),
+    ("download and run", re.compile(r"(curl|wget|Invoke-WebRequest|\biwr\b)[^\n|]*\|\s*(ba|z)?sh\b|\|\s*iex\b", re.I), "all"),
+    ("credential files", re.compile(r"\.ssh\b|id_(rsa|ed25519|ecdsa)|\.aws/|\.config/gcloud|\.git-credentials|"
+                                    r"\.docker/config|\.kube/config|\.netrc|\.gnupg|\.npmrc\b", re.I), "all"),
+    ("secret env vars", re.compile(r"(process\.env|System\.get_env|std::env::var|os\.environ|os\.getenv|ENV\[)"
+                                   r"[^\n]{0,60}(TOKEN|SECRET|PASSW|_KEY|AWS_|NPM_|GITHUB_|GH_)", re.I), "all"),
+    ("whole environment", re.compile(r"\benv\s*\||printenv|os\.environ\b(?!\s*[\[.(])|System\.get_env\(\s*\)|"
+                                     r"process\.env\b(?!\s*[\[.])"), "dev"),
+    ("runs commands", re.compile(r"child_process|execSync|spawnSync|\bexecFile\b|System\.cmd|:os\.cmd|Port\.open|"
+                                 r"std::process::Command|subprocess\.|os\.system|\bvm\.ffi\b|\beval\(|new Function\(|"
+                                 r"Runtime\.getRuntime"), "dev"),
+    ("decodes data", re.compile(r"Base\.decode64|base64\s+(-d|--decode)|atob\(|b64decode|,\s*['\"]base64['\"]\s*\)",
+                                re.I), "all"),
+    ("long encoded blob", re.compile(r"[A-Za-z0-9+/=]{200,}"), "all"),
+    ("install script", re.compile(r'"(pre|post)?install"\s*:|"prepare"\s*:|"prepublish(Only)?"\s*:'), "all"),
+    ("runs by itself", re.compile(r'"runOn"\s*:\s*"folderOpen"|\bffi\s*=\s*true|ignore-scripts\s*=\s*false'), "all"),
+    ("dependency source", re.compile(r'git\+(https?|ssh)://|"github:|"resolved"\s*:\s*"https?://(?!registry\.(npmjs\.org|'
+                                     r'yarnpkg\.com))|tarball:\s*https?://(?!registry\.npmjs\.org)|source = "git\+|'
+                                     r'https?://[^\s"\']+\.(tgz|tar\.gz)\b'), "all"),
+    ("network host", re.compile(r"https?://(?!localhost\b|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "dev"),
+]
+MAL_INPUT_CAP = 150_000   # chars of diff for the check (tests and dev files; files with hits first)
 
 
-def best_unit_from(path: str, units: list[Unit], code_files: dict[str, list[str]]) -> Unit | None:
-    best, blen = None, 0
-    for u in units:
-        for fp in code_files.get(u.uid, []):
-            cp = _common_dir(path, fp)
-            ln = len(cp.split("/")) if cp else 0
-            if ln > blen or (ln == blen and ln > 0 and best is not None and u.effective > best.effective):
-                best, blen = u, ln
-    return best
+def is_dev_exec(path: str) -> bool:
+    return glob_match(path, DEV_EXEC_GLOBS) is not None
+
+
+def malicious_scan(wt: Path, mb: str, head: str, recs: list[FileRec], limit: int = 300) -> list[dict]:
+    """Added lines that match MAL_PATTERNS, in every changed text file but docs (lockfiles included)."""
+    kinds = {r.path: r.kind for r in recs}
+    paths = [r.path for r in recs if r.kind != "docs" and not r.binary and r.reason != "outside --paths"]
+    if not paths:
+        return []
+    keep = set(paths)
+    diff = git(wt, "diff", "--no-color", "--no-ext-diff", "-U0", "-M", mb, head, "--", *_pathspecs(
+        [r for r in recs if r.path in keep and not _ODD_NAME.search(r.path)]))
+    hits, path, line = [], None, 0
+    for ln in diff.splitlines():
+        if ln.startswith("+++ "):
+            path = ln[6:] if ln.startswith("+++ b/") else None
+            continue
+        m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", ln)
+        if m:
+            line = int(m.group(1))
+            continue
+        if path is None or not ln.startswith("+"):
+            continue
+        dev = kinds.get(path) == "test" or is_dev_exec(path)
+        for name, rx, where in MAL_PATTERNS:
+            if (where == "all" or dev) and rx.search(ln[1:]):
+                hits.append({"file": path, "line": line, "kind": name, "text": ln[1:].strip()[:200]})
+        line += 1
+        if len(hits) >= limit:
+            break
+    for r in recs:   # files that run by themselves just by being there
+        if glob_match(r.path, ["**/.vscode/tasks.json", "**/.husky/**", "**/.githooks/**", "**/.devcontainer/**",
+                               "**/lefthook.y*ml", "**/.pre-commit-config.yaml", "**/.envrc"]) and r.status != "D":
+            hits.append({"file": r.path, "line": 0, "kind": "runs by itself", "text": "file changed: " + r.path})
+    return hits[:limit]
+
+
+def malicious_input(wt: Path, mb: str, head: str, recs: list[FileRec], attrs: Path) -> tuple[str, list[dict]]:
+    """The diff the malicious-code check reads (tests and files that run on developer machines; files with a
+    pattern hit first; lockfiles only through their hits) and the pattern hits. ("", hits) when nothing of
+    that kind changed."""
+    hits = malicious_scan(wt, mb, head, recs)
+    hit_files = {h["file"] for h in hits}
+    pick = [r for r in recs if not r.binary and r.kind != "docs" and not _ODD_NAME.search(r.path) and r.reason not in (
+        "lockfile", "outside --paths") and (r.kind == "test" or is_dev_exec(r.path) or r.path in hit_files)]
+    pick.sort(key=lambda r: (r.path not in hit_files, r.path))
+    out, used = [], 0
+    for r in pick:
+        d = git(wt, "diff", "--no-color", "--no-ext-diff", "-U3", "-M", mb, head, "--", *_pathspecs([r]), attrs=attrs)
+        if used + len(d) > MAL_INPUT_CAP:
+            out.append(f"[... {r.path}: diff not shown (over {MAL_INPUT_CAP:,} chars); read it in the checkout]\n")
+            continue
+        out.append(d)
+        used += len(d)
+    return "".join(out), hits
 
 
 # --------------------------------------------------------------------------------------
@@ -954,4 +921,4 @@ def sizes(recs: list[FileRec]) -> dict:
 
 __all__ = ["FileRec", "Unit", "classify_files", "collect_tests", "tests_block", "seed_diff", "plain_diff",
            "docs_diff", "changed_symbols", "plan_units", "filtered_table", "not_reviewed", "sizes", "size_class",
-           "glob_match", "is_low_risk", "ws_sensitive", "ATTRS", "NORMAL_MAX", "LARGE_MAX", "TEST_WEIGHT", "DIFF_CAP"]
+           "glob_match", "is_low_risk", "malicious_scan", "malicious_input", "ws_sensitive", "ATTRS", "MAX_EFFECTIVE", "TEST_WEIGHT", "DIFF_CAP"]

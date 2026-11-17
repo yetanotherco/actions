@@ -215,10 +215,11 @@ The diff comes from git, so PRs over the pulls API's 20000-line diff limit still
 
 `pr_review_multi.yml` runs a security review with several models and posts **one** comment.
 
-1. **Reviewers.** Opus 5.5 (effort xhigh), GPT 6.1 Sol, Kimi K3.1, GLM 5.3 and DeepSeek V4 Pro review the PR in parallel. Each is an agent (Claude Code or Codex) in a read-only sandbox with no network, so it reads callers, checks and types outside the diff. A soft budget asks each reviewer to finish: after 80 commands (120 for GPT and GLM), about $1.50–2.50 of estimated spend, or 30 minutes, whichever comes first. Parts made only of `low_risk` files get three reviewers instead of five (see below).
+1. **Reviewers.** Opus 5.5 (effort xhigh), GPT 6.1 Sol, Kimi K3.1, GLM 5.3 and DeepSeek V4 Pro review the PR in parallel. Each is an agent (Claude Code or Codex) in a read-only sandbox with no network, so it reads callers, checks and types outside the diff. A soft budget asks each reviewer to finish: after 80 commands (120 for GPT and GLM), about $1.50–2.50 of estimated spend, or 30 minutes, whichever comes first; the dollar limits grow with the size of the prompt. A PR made only of `low_risk` code gets three reviewers instead of five (see below).
 2. **Housekeeping.** A cheap model (DeepSeek V4 Flash) lists stale docs, missing tests, leftovers and inconsistencies, separately from the security review.
-3. **Merge and judge.** Duplicate findings are merged. A judge (GPT 6.1 Sol) checks the findings against the code, sees every reviewer's claim, and marks each one a bug, suspected, pre-existing, or likely not a problem. The comment says how many it checked; findings it did not reach (more than 20, or over the budget) are marked *unverified*.
-4. **Comment.** It opens with a table of findings to check (severity, status, which models found it, where). Below that come collapsed sections: details, duplicates, pre-existing bugs, findings the judge dismissed (with its reason), and housekeeping. A last line gives what the review cost.
+3. **Malicious-code check.** One cheap call (DeepSeek V4 Flash) looks for code aimed at whoever builds, tests or opens the repository: it reads the tests, build and install scripts, git hooks, editor tasks and dependency sources the security reviewers don't see, plus every line a pattern scan matched anywhere in the PR (hidden Unicode, `curl | sh`, credential paths, secret environment variables, dependencies from git URLs or tarballs). Anything it reports goes at the top of the comment. On 10 planted attacks and 6 look-alike clean changes it caught all 10 and flagged none of the 6; on 10 real merged PRs it raised one item (a dependency from a personal fork). It costs well under a cent per PR.
+4. **Merge and judge.** Duplicate findings are merged. A judge (GPT 6.1 Sol) checks the findings against the code, sees every reviewer's claim, and marks each one a bug, suspected, pre-existing, or likely not a problem. The comment says how many it checked; findings it did not reach (more than 20, or over the budget) are marked *unverified*.
+5. **Comment.** It opens with a table of findings to check (severity, status, which models found it, where). Below that come collapsed sections: details, duplicates, pre-existing bugs, findings the judge dismissed (with its reason), and housekeeping. A last line gives what the review cost.
 
 ```yaml
 name: AI Review
@@ -255,14 +256,14 @@ The workflow also accepts `pull_request` events, for example a `labeled` trigger
 |---|---|
 | `/review` | Review the PR |
 | `/review budget=80` | Use $80 for this review (at most `max_budget`) |
-| `/review continue` | Review only the parts that an earlier, budget-limited review of the same commit skipped; finished parts are reused |
+| `/review continue` | Finish an earlier review of the same commit that stopped at its budget or time limit; reviewers that finished are reused |
 
 **Inputs:**
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `command` | No | `/review` | The caller's comment command, used in the hint a partial review prints |
-| `pr_budget` | No | `0` | USD limit per review. `0` = $20 for a PR reviewed in one part, $50 for a PR split into parts |
+| `pr_budget` | No | `0` | USD limit per review. `0` = $30 |
 | `max_budget` | No | `100` | Highest budget a `budget=N` comment may ask for |
 | `lanes` | No | `''` | Reviewer models, comma-separated: `claude`, `gpt`, `kimi`, `glm`, `deepseek`, `gemini`, `grok`, `fable`. Empty = the first five |
 | `config_dir` | No | `.github/ai-review` | Directory with the optional `config.toml` and `threat_model.md` in your repository |
@@ -290,7 +291,7 @@ Each changed file is handled by the first rule that matches:
 4. Tests (built-in patterns such as `tests/`, `*_test.rs`, `*.test.ts`, plus `test_globs`): reviewers get the test files and the test functions they add, change or remove, not their diff.
 5. Everything else is code and gets all five reviewers.
 
-A part made only of `low_risk` code gets `low_risk_lanes` instead, unless a cheap triage call finds that it touches keys, auth, funds, cryptography or untrusted input. Large PRs are reviewed in path order, low-risk parts last.
+A PR made only of `low_risk` code gets `low_risk_lanes` instead, unless a cheap triage call finds that it touches keys, auth, funds, cryptography or untrusted input.
 
 | Key | Required | Default | What it does |
 |-----|----------|---------|--------------|
@@ -298,8 +299,8 @@ A part made only of `low_risk` code gets `low_risk_lanes` instead, unless a chea
 | `ignore` | No | none | Files not reviewed |
 | `test_globs` | No | none | Extra test file patterns |
 | `always_review` | No | none | Files reviewed as code even if they look like docs, tests, generated or vendored code |
-| `low_risk` | No | none | Code that gets fewer reviewers and goes last in a large PR (demo apps, local tooling) |
-| `low_risk_lanes` | No | `gpt`, `kimi`, `glm` | Reviewers of a part made only of `low_risk` code |
+| `low_risk` | No | none | Code that needs fewer reviewers (demo apps, local tooling) |
+| `low_risk_lanes` | No | `gpt`, `kimi`, `glm` | Reviewers of a PR made only of `low_risk` code |
 
 ```toml
 threat_model = "threat_model.md"
@@ -315,10 +316,11 @@ Most repositories don't need a `threat_model.md`. Add one only when a reviewer c
 
 #### Cost and large PRs
 
-- **Typical cost:** about $3 for a PR reviewed in one part, at API prices; Opus is about 40% of it. The comment's last line shows the cost of each review. In CI this figure is computed from token counts and published prices. The OpenRouter bill is exact, but a key shared by several repositories can't attribute it to one review.
-- **Budget:** a PR over about 4,000 *effective* lines (changed code, with whitespace-only changes, except in Python, shell, YAML and Makefiles, and long deletions compacted, plus half the test lines; docs, lockfiles and generated files do not count) is split into parts of about 2,500 lines, up to about 4,000 for one area (by package, else by the first two path components). The parts are reviewed in path order, low-risk parts last, until the PR budget runs out, keeping enough for the judge (at least 15% of a split PR's budget). Parts left unreviewed are listed at the top of the comment; `/review continue` reviews them with a new budget. Changed files that no reviewer saw (binary to git, whitespace-only changes, unusual file names) are listed there too.
+- **Typical cost:** about $3.40 for a normal PR at API prices, about half of it Opus; about $7–12 near the size limit. The comment's last line shows the cost of each review. In CI this figure is computed from token counts and published prices. The OpenRouter bill is exact, but a key shared by several repositories can't attribute it to one review.
+- **Size limit:** one review covers the whole PR, up to 20,000 *effective* lines: changed code (whitespace-only changes ignored, except in Python, shell, YAML and Makefiles; long deletions compacted) plus half the test lines; docs, lockfiles and generated files do not count. A bigger PR is not reviewed: the comment gives its effective size and asks for it to be split. The reviewers' prompt holds about 250,000 characters of diff (6,000-7,000 lines of whole functions); above that the largest changes come first and the rest is listed for them to read in the checkout. Changed files that no reviewer saw (binary to git, whitespace-only changes, unusual file names) are listed at the top of the comment.
+- **Budget:** $30 per review by default (`pr_budget`; `budget=N` in a comment raises it). If a review stops at its budget or time limit, the comment says so and `/review continue` finishes it, reusing the reviewers that finished.
 - **Hard limits:** each reviewer is killed at its lane cap ($3–4 estimated). A watchdog stops the whole review at the PR budget, counting this review's own computed spend (other reviews may share the key). The ceilings the providers enforce are the OpenRouter key's credit limit, for every model but Opus, and the Anthropic workspace's spend limit, for Opus.
-- **Time:** a one-part PR takes 15–35 minutes. The parts of a split PR run one after another; no new part starts after 240 minutes, so the review and its comment finish inside the job's 330-minute limit, and `continue` picks up the rest.
+- **Time:** a review takes 15–35 minutes, up to about an hour for a PR near the size limit. The judge is skipped (findings marked unverified) if the reviewers end more than 285 minutes after the start, so the comment is posted inside the job's 330-minute limit.
 
 #### Sandbox check
 

