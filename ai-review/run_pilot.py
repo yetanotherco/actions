@@ -1009,6 +1009,7 @@ def load_repo_config(owner: str, name: str, path: str | None = None) -> dict:
         data = tomllib.loads(p.read_text())
         check_config_keys(data, p.name)
         cfg.update(data)
+        cfg["threat_model_set"] = "threat_model" in data   # only a named file that is missing is a warning
         # only a file next to the config (the workflow downloads that directory's files): no other path,
         # so a config cannot pull e.g. /proc/self/environ into every prompt
         tm = str(cfg.get("threat_model") or "threat_model.md")
@@ -3984,7 +3985,9 @@ def main() -> None:
 
     tm_path = ROOT / cfg["threat_model"]   # an absolute path (--repo-config) stays as is
     if not tm_path.is_file():
-        log(f"WARNING: threat model {tm_path} not found: reviewing without one")
+        # optional: most repositories have none
+        log(("WARNING: the config names threat model " if cfg.get("threat_model_set") else "no threat model ")
+            + f"{tm_path.name}, not found: reviewing without one")
     threat = tm_path.read_text() if tm_path.is_file() else "(no threat-model note for this repository)"
     body = (meta.get("body") or "")[:BODY_CAP]
     base_values = {"OUTPUT_SCHEMA": (ROOT / "schema" / "findings.json").read_text().strip(),

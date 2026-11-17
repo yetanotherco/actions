@@ -265,7 +265,7 @@ The workflow also accepts `pull_request` events, for example a `labeled` trigger
 | `pr_budget` | No | `0` | USD limit per review. `0` = $20 for a PR reviewed in one part, $50 for a PR split into parts |
 | `max_budget` | No | `100` | Highest budget a `budget=N` comment may ask for |
 | `lanes` | No | `''` | Reviewer models, comma-separated: `claude`, `gpt`, `kimi`, `glm`, `deepseek`, `gemini`, `grok`, `fable`. Empty = the first five |
-| `config_dir` | No | `.github/ai-review` | Directory with `config.toml` and `threat_model.md` in your repository |
+| `config_dir` | No | `.github/ai-review` | Directory with the optional `config.toml` and `threat_model.md` in your repository |
 | `housekeeping` | No | `true` | Run the housekeeping reviewer |
 | `sandbox_check` | No | `strict` | Check the Codex reviewers' sandbox before any paid call (not Claude Code's): `strict` stops the review if it fails, `warn` only logs it, `off` skips it ([details](#sandbox-check)) |
 
@@ -280,7 +280,7 @@ The calling job must grant `contents: read`, `pull-requests: write` and `actions
 
 #### Repository config
 
-Put a `config.toml` and a `threat_model.md` in `.github/ai-review/` in your repository. Both are read from the PR's base branch, so a PR's own changes to them do not apply to its review. (Callers that also trigger on `pull_request` events run the PR's version of their own workflow file, which can change the inputs.) `threat_model` must be the name of a `.md` file in the same directory: the workflow fetches only `*.toml` and `*.md` files. Without a config every file gets the full review.
+Both files are optional: a `config.toml` and a `threat_model.md` in `.github/ai-review/` in your repository. They are read from the PR's base branch, so a PR's own changes to them do not apply to its review. (Callers that also trigger on `pull_request` events run the PR's version of their own workflow file, which can change the inputs.) `threat_model` must be the name of a `.md` file in the same directory: the workflow fetches only `*.toml` and `*.md` files. Without a config every file gets the full review.
 
 Each changed file is handled by the first rule that matches:
 
@@ -294,7 +294,7 @@ A part made only of `low_risk` code gets `low_risk_lanes` instead, unless a chea
 
 | Key | Required | Default | What it does |
 |-----|----------|---------|--------------|
-| `threat_model` | No | `threat_model.md` | What matters in this repository; goes into every reviewer prompt |
+| `threat_model` | No | `threat_model.md`, if present | What matters in this repository; goes into every reviewer prompt |
 | `ignore` | No | none | Files not reviewed |
 | `test_globs` | No | none | Extra test file patterns |
 | `always_review` | No | none | Files reviewed as code even if they look like docs, tests, generated or vendored code |
@@ -311,7 +311,7 @@ low_risk = ["examples/**", "scripts/**"]
 
 The keys `sensitive`, `default_sensitive`, `priority`, `nonsensitive_lanes` and `unit_depth` of earlier versions are refused with a message that says what replaces them.
 
-`threat_model.md` lists what a reviewer should care about most: core guarantees, untrusted inputs, known-dangerous areas. See [`.github/ai-review/`](.github/ai-review/) in this repository for an example.
+Most repositories don't need a `threat_model.md`. Add one only when a reviewer can't tell from the code what is attacker-controlled or what the system must guarantee (for a prover: the verifier must reject false proofs). Keep it short and say what matters; don't list what not to report: in our tests, rules like that made the models miss real bugs. See [`.github/ai-review/`](.github/ai-review/) in this repository for an example.
 
 #### Cost and large PRs
 

@@ -40,7 +40,7 @@ on:
         type: string
         default: ''
       config_dir:
-        description: 'Directory of the reviewed repository holding config.toml and threat_model.md, read from the PR base branch'
+        description: 'Directory of the reviewed repository holding the optional config.toml and threat_model.md, read from the PR base branch'
         required: false
         type: string
         default: '.github/ai-review'
@@ -197,6 +197,10 @@ jobs:
                 gh api -H 'Accept: application/vnd.github.raw+json' "repos/$GH_REPO/contents/$CONFIG_DIR/$f?ref=$BASE_SHA" > "$dest/$f" ;;
             esac
           done < "$RUNNER_TEMP/config_files.txt"
+          # either file is optional: a threat model alone gets an empty config, which reads it from next to it
+          if [ ! -f "$dest/config.toml" ] && [ -f "$dest/threat_model.md" ]; then
+            : > "$dest/config.toml"
+          fi
           if [ -f "$dest/config.toml" ]; then
             echo "path=$dest/config.toml" >> "$GITHUB_OUTPUT"
           fi
