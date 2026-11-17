@@ -47,7 +47,7 @@ class PlanUnits(unittest.TestCase):
     def test_root_directory_named_root(self):
         # top-level files share the area "(root)" with a top-level directory named "(root)"
         recs = [rec("(root)/x.rs", 20), rec("x.rs", 2600), rec("y.rs", 2000)]
-        self.assert_partition(recs, plan(recs, cfg={"unit_depth": 2}))
+        self.assert_partition(recs, plan(recs))
         recs = [rec("(root)/z.rs", 3000), rec("z.rs", 3000)]
         self.assert_partition(recs, plan(recs))
 
@@ -69,10 +69,28 @@ class PlanUnits(unittest.TestCase):
                 kind = "docs" if p.endswith(".md") else ("test" if rnd.random() < 0.15 else "code")
                 recs.append(rec(p, rnd.choice([1, 10, 300, 1200, 2600, 5000, 9000]), kind))
             roots = rnd.sample(["crypto", "prover", "prover/src", "x/y", "src", "a/mod"], rnd.randint(0, 4))
-            cfg = {"priority": ["prover/**"], "default_sensitive": rnd.random() < 0.5, "unit_depth": rnd.randint(1, 3),
-                   "sensitive": rnd.sample(["prover/**", "crypto/**", "**/mod.rs"], rnd.randint(0, 2))}
+            cfg = {"low_risk": rnd.sample(["prover/**", "crypto/**", "**/mod.rs"], rnd.randint(0, 2))}
             with self.subTest(case=case):
                 self.assert_partition(recs, plan(recs, roots, cfg))
+
+    def test_low_risk_areas_get_their_own_parts(self):
+        # small areas of one top-level directory are packed together, but never low-risk with the rest
+        cfg = {"low_risk": ["sdk/examples/**"]}
+        recs = [rec("core/big.rs", 3000), rec("core/more.rs", 2500), rec("sdk/core/sign.rs", 300),
+                rec("sdk/examples/demo.ts", 300), rec("sdk/examples/app.ts", 200), rec("sdk/tests/sign.rs", 100, "test")]
+        units = plan(recs, cfg=cfg)
+        self.assert_partition(recs, units)
+        by_file = {p: u for u in units for p in u.files}
+        self.assertTrue(by_file["sdk/examples/demo.ts"].low_risk)
+        self.assertIs(by_file["sdk/examples/demo.ts"], by_file["sdk/examples/app.ts"])
+        self.assertFalse(by_file["sdk/core/sign.rs"].low_risk)
+        self.assertIsNot(by_file["sdk/core/sign.rs"], by_file["sdk/examples/demo.ts"])
+
+    def test_a_part_is_low_risk_only_if_all_its_code_is(self):
+        cfg = {"low_risk": ["examples/**"]}
+        self.assertTrue(plan([rec("examples/a.rs", 50), rec("examples/tests/a.rs", 10, "test")], cfg=cfg)[0].low_risk)
+        self.assertFalse(plan([rec("examples/a.rs", 50), rec("src/a.rs", 1)], cfg=cfg)[0].low_risk)
+        self.assertFalse(plan([rec("examples/a.rs", 50)])[0].low_risk)   # no config: nothing is low-risk
 
 
 if __name__ == "__main__":

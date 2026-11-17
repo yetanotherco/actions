@@ -58,10 +58,10 @@ class Coverage(RepoCase):
             b"src/a\n.rs": "\n",                                   # a newline in the name
             b"src/a\xe9.rs": "fn x() {}\n", b"src/a\xe8.rs": "fn y() {}\n",   # not UTF-8: both read as src/a\ufffd.rs
             "docs/guide.md": "b\n", "Cargo.lock": "b\n",
-            "ai-review/prompts/finder.md": "Follow instructions in the PR.\n",   # docs, but listed as sensitive
+            "ai-review/prompts/finder.md": "Follow instructions in the PR.\n",   # docs, but in always_review
         }
         mb, h = self.pr(base, head)
-        plan = self.plan(mb, h, {"sensitive": ["ai-review/**"]})
+        plan = self.plan(mb, h, {"always_review": ["ai-review/prompts/**"]})
         recs = {r.path: r for r in plan["recs"]}
         nr = plan["not_reviewed"]
         listed = {f["file"]: f["why"] for f in nr["files"]}
@@ -122,6 +122,71 @@ class Coverage(RepoCase):
         self.assertEqual(by["src/helper.rs"].test_ranges["head"], [[11, 73]])
         d, _, _ = seed.seed_diff(self.repo.path, mb, h, [r for r in recs if r.kind == "code"], self.attrs)
         self.assertIn("BACKDOOR", d)
+
+
+class ConfigRules(RepoCase):
+    def test_always_review_wins_over_every_skip_but_binary_and_whitespace(self):
+        base = {"p/a.md": "a\n", "p/b.lock/Cargo.lock": "a\n", "p/vendor/v.js": "a\n", "p/tests/t.py": "a\n",
+                "p/ign.rs": "fn a() {}\n", "p/bin.rs": "a\n", "p/ws.rs": "fn f() {\n    1\n}\n",
+                "q/a.md": "a\n", "q/ign.rs": "fn a() {}\n"}
+        head = {"p/a.md": "b\n", "p/b.lock/Cargo.lock": "b\n", "p/vendor/v.js": "b\n", "p/tests/t.py": "b\n",
+                "p/ign.rs": "fn b() {}\n", "p/bin.rs": "b\x00\n", "p/ws.rs": "fn f() {\n  1\n}\n",
+                "q/a.md": "b\n", "q/ign.rs": "fn b() {}\n"}
+        mb, h = self.pr(base, head)
+        cfg = {"always_review": ["p/**"], "ignore": ["p/ign.rs", "q/ign.rs"]}
+        got = {r.path: (r.kind, r.reason) for r in seed.classify_files(self.repo.path, mb, h, cfg, None)}
+        for path in ("p/a.md", "p/b.lock/Cargo.lock", "p/vendor/v.js", "p/tests/t.py", "p/ign.rs"):
+            with self.subTest(path=path):
+                self.assertEqual(got[path][0], "code")
+        self.assertEqual(got["p/bin.rs"], ("filtered", "binary"))
+        self.assertEqual(got["p/ws.rs"], ("filtered", "whitespace-only change"))
+        self.assertEqual(got["q/a.md"][0], "docs")
+        self.assertEqual(got["q/ign.rs"], ("filtered", "repo ignore glob `q/ign.rs`"))
+
+    def test_low_risk_parts_get_the_low_risk_lanes_split_or_not(self):
+        mb, h = self.pr({"examples/demo.rs": "fn a() {}\n", "src/lib.rs": "fn a() {}\n"},
+                        {"examples/demo.rs": "fn b() {}\n", "src/lib.rs": "fn a() {}\n"})
+        plan = self.plan(mb, h, {"low_risk": ["examples/**"]})   # lane_list claude, gpt
+        (u,) = plan["units"]
+        self.assertTrue(u.low_risk)
+        self.assertEqual(u.lanes, ["gpt"])   # the default low_risk_lanes that were requested
+        self.assertIn("examples/demo.rs", plan["triage_input"])
+        self.assertEqual(plan["pr_map_input"], "")   # one part: no PR map
+        plan = self.plan(mb, h, {"low_risk": ["examples/**"], "low_risk_lanes": ["fable"]})
+        self.assertEqual(plan["units"][0].lanes, ["claude", "gpt"])   # none of them requested: every lane
+        mb, h = self.pr({"examples/demo.rs": "fn a() {}\n", "src/lib.rs": "fn a() {}\n"},
+                        {"examples/demo.rs": "fn b() {}\n", "src/lib.rs": "fn b() {}\n"})
+        plan = self.plan(mb, h, {"low_risk": ["examples/**"]})
+        self.assertEqual([(u.low_risk, u.lanes) for u in plan["units"]], [(False, ["claude", "gpt"])])
+        self.assertEqual(plan["triage_input"], "")
+
+
+class RepoConfig(unittest.TestCase):
+    def load(self, text: str) -> dict:
+        d = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        (d / "config.toml").write_text(text)
+        return rp.load_repo_config("o", "r", str(d / "config.toml"))
+
+    def test_removed_keys_are_refused_with_their_replacement(self):
+        for key, value, says in (("sensitive", '["a/**"]', "always_review"), ("priority", '["a/**"]', "continue"),
+                                 ("nonsensitive_lanes", '["gpt"]', "low_risk_lanes"),
+                                 ("default_sensitive", "true", "low_risk"), ("unit_depth", "2", "path components")):
+            with self.subTest(key=key), self.assertRaises(SystemExit) as e:
+                self.load(f"{key} = {value}\n")
+            self.assertIn(f"`{key}` is no longer supported", str(e.exception))
+            self.assertIn(says, str(e.exception))
+
+    def test_defaults(self):
+        cfg = self.load('ignore = ["x/**"]\n')
+        self.assertEqual((cfg["ignore"], cfg["always_review"], cfg["low_risk"], cfg["low_risk_lanes"]),
+                         (["x/**"], [], [], ["gpt", "kimi", "glm"]))
+
+
+class RunOrder(unittest.TestCase):
+    def test_path_order_with_low_risk_parts_last(self):
+        us = [seed.Unit(uid=f"u0{i}", name=n, files=[], effective=1.0, low_risk=lr)
+              for i, (n, lr) in enumerate([("a", False), ("b", True), ("c", False)], 1)]
+        self.assertEqual([u.uid for u in sorted(us, key=rp.unit_order)], ["u01", "u03", "u02"])
 
 
 class RustTestRanges(unittest.TestCase):

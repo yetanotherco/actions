@@ -8,7 +8,7 @@ From a checkout at the PR head and the merge-base it builds a *plan*:
   - test files and the test functions they add / change / remove (tests are not put in the
     seed diff; the agentic lanes can read them in the checkout);
   - the effective size (code lines + 0.5 x test lines, after trimming) and the size class;
-  - review units for large PRs (split by package / area, sensitive units marked).
+  - review units for large PRs (split by package / area, low-risk units marked).
 Per unit it renders the seed diff (whole-function context, deletion-only hunks compacted)
 and the plain `-U3` diff used by the static-diff comparison mode.
 """
@@ -27,6 +27,7 @@ NORMAL_MAX = 4000       # effective lines: up to this, one unit; above it, the P
 LARGE_MAX = 20000       # "large" up to this, "huge" above (a label only: both split, both under --pr-budget)
 UNIT_TARGET = 2500      # small areas are packed together up to about this size
 UNIT_MAX = 4000         # an area bigger than this is split one directory level deeper, then by files
+UNIT_DEPTH = 2          # outside a package, an area is the first UNIT_DEPTH path components
 TEST_WEIGHT = 0.5
 DIFF_CAP = 250_000      # chars of diff in the prompt (was 150k: 13-25% of large-PR units lost files)
 DELETION_COMPACT_MIN = 15  # deletion-only hunks with fewer removed lines stay in full
@@ -212,15 +213,13 @@ class Unit:
     uid: str
     name: str
     files: list[str]
-    sensitive: bool
-    sensitive_hits: list[str]
     effective: float
     code_files: int = 0
     test_files: int = 0
     docs_files: list[str] = field(default_factory=list)
     lanes: list[str] = field(default_factory=list)
-    priority: int = 999          # index of the first config `priority` glob any file matches
-    sensitive_lines: float = 0.0  # effective lines in files that match a sensitive glob
+    low_risk: bool = False       # every code file matches a config `low_risk` glob: fewer reviewers, run last
+    promoted: str = ""           # why triage gave a low-risk unit the full review anyway
     status: str = "planned"
     note: str = ""
 
@@ -235,6 +234,7 @@ def classify_files(wt: Path, mb: str, head: str, cfg: dict, paths: list[str] | N
     ws = _parse_numstat_z(git(wt, "diff", "--numstat", "-z", "-M", "-C", "-w", mb, head))
     ignore = list(cfg.get("ignore", []))
     test_globs = TEST_GLOBS + list(cfg.get("test_globs", []))
+    always = list(cfg.get("always_review", []))
     recs: list[FileRec] = []
     for path, (st, old) in sorted(ns.items()):
         a_raw, d_raw, _ = raw.get(path, (None, None, None))
@@ -250,22 +250,22 @@ def classify_files(wt: Path, mb: str, head: str, cfg: dict, paths: list[str] | N
         ext = PurePosixPath(path).suffix.lower()
         hit_ignore = glob_match(path, ignore)
         hit_gen = glob_match(path, GENERATED_GLOBS)
+        # `always_review` (model prompts, allowlists, vendored code the repo wants reviewed): code, whatever
+        # the lockfile, ignore, generated, docs and test rules say; binary and whitespace-only files stay out
+        keep = glob_match(path, always) is not None
         if paths and not glob_match(path, paths) and not (old and glob_match(old, paths)):
             r.kind, r.reason = "filtered", "outside --paths"
-        elif name in LOCKFILE_NAMES:
+        elif name in LOCKFILE_NAMES and not (keep and not binary):
             r.kind, r.reason = "filtered", "lockfile"
         elif binary:
             r.kind, r.reason = "filtered", "binary"
-        elif hit_ignore:
+        elif hit_ignore and not keep:
             r.kind, r.reason = "filtered", f"repo ignore glob `{hit_ignore}`"
-        elif hit_gen:
+        elif hit_gen and not keep:
             r.kind, r.reason = "filtered", f"generated/vendored (`{hit_gen}`)"
-        elif ((ext in DOC_EXTS and not NOT_DOCS.search(path)) or name in DOC_NAMES) \
-                and not glob_match(path, list(cfg.get("sensitive", []))):
-            # docs, unless the repo lists them as sensitive (reviewer prompts, allowlists): those are
-            # reviewed as code
+        elif ((ext in DOC_EXTS and not NOT_DOCS.search(path)) or name in DOC_NAMES) and not keep:
             r.kind, r.reason = "docs", "docs lane only"
-        elif glob_match(path, test_globs):
+        elif glob_match(path, test_globs) and not keep:
             r.kind, r.reason = "test", "test file: listed, not diffed"
         elif r.add == 0 and r.dele == 0 and (r.add_raw or r.del_raw):
             r.kind, r.reason = "filtered", "whitespace-only change"
@@ -641,34 +641,26 @@ def seed_diff(wt: Path, mb: str, head: str, recs: list[FileRec], attrs: Path,
         diff, saved, omitted = _ranked_diff(wt, base, mb, head, code, tr, attrs, cap, cfg or {})
         if omitted_out is not None:
             omitted_out.extend(omitted)
-        mode = (f"ranked to fit {cap:,} chars: sensitive and priority files first, whole functions "
+        mode = (f"ranked to fit {cap:,} chars: larger changes first, low-risk files last, whole functions "
                 f"where they fit, shorter context otherwise; {len(omitted)} file(s) not shown, listed "
                 f"at the end (read them with your tools)")
     return diff, mode, saved
 
 
-def file_sensitivity(path: str, cfg: dict) -> str | None:
-    """Why a file is sensitive, or None. A `sensitive` glob match; otherwise, with
-    `default_sensitive` (the default), any path that no `low_risk` glob covers: an unlisted path
-    (a new directory, a file nobody classified) gets the full review instead of the reduced one."""
-    hit = glob_match(path, list(cfg.get("sensitive", [])))
-    if hit:
-        return hit
-    if cfg.get("default_sensitive", True) and not glob_match(path, list(cfg.get("low_risk", []))):
-        return "(unlisted: sensitive by default)"
-    return None
+def is_low_risk(path: str, cfg: dict) -> bool:
+    """A path matched by a config `low_risk` glob. Everything else gets the full review: an unlisted
+    path (a new directory, a file nobody classified) is never low-risk."""
+    return glob_match(path, list(cfg.get("low_risk", []))) is not None
 
 
 def _rank_key(r: FileRec, cfg: dict) -> tuple:
-    sensitive = file_sensitivity(r.path, cfg) is not None
-    prio_globs = list(cfg.get("priority", []))
-    g = glob_match(r.path, prio_globs)
-    return (0 if sensitive else 1, prio_globs.index(g) if g else 999, -r.lines, r.path)
+    return (is_low_risk(r.path, cfg), -r.lines, r.path)
 
 
 def _ranked_diff(wt: Path, base: list[str], mb: str, head: str, code: list[FileRec], tr: dict,
                  attrs: Path, cap: int, cfg: dict) -> tuple[str, dict[str, int], list[str]]:
-    """Per-file diffs in priority order until `cap`: -W, else -U20, else -U3; the rest listed."""
+    """Per-file diffs, larger changes first and low-risk files last, until `cap`: -W, else -U20, else -U3;
+    the rest listed."""
     parts: list[str] = []
     saved_all: dict[str, int] = {}
     omitted: list[str] = []
@@ -778,18 +770,17 @@ def size_class(effective: float) -> str:
 
 
 def plan_units(wt: Path, head: str, recs: list[FileRec], cfg: dict, force_single: bool = False) -> list[Unit]:
-    priority_globs = list(cfg.get("priority", []))
     reviewable = [r for r in recs if r.kind in ("code", "test")]
     eff_total = sum(r.effective for r in reviewable)
 
+    def low(files: list[FileRec]) -> bool:
+        code = [r for r in files if r.kind == "code"]
+        return bool(code) and all(is_low_risk(r.path, cfg) for r in code)
+
     def mk(uid: str, name: str, files: list[FileRec]) -> Unit:
-        hits = sorted({h for r in files if (h := file_sensitivity(r.path, cfg))})
-        prio = min([priority_globs.index(g) for r in files if (g := glob_match(r.path, priority_globs))] or [999])
-        return Unit(uid=uid, name=name, files=[r.path for r in files], sensitive=bool(hits),
-                    sensitive_hits=hits, effective=sum(r.effective for r in files),
+        return Unit(uid=uid, name=name, files=[r.path for r in files], effective=sum(r.effective for r in files),
                     code_files=sum(r.kind == "code" for r in files),
-                    test_files=sum(r.kind == "test" for r in files), priority=prio,
-                    sensitive_lines=sum(r.effective for r in files if file_sensitivity(r.path, cfg)))
+                    test_files=sum(r.kind == "test" for r in files), low_risk=low(files))
 
     if force_single or size_class(eff_total) == "normal":
         u = mk("u01", "whole PR", reviewable)
@@ -798,7 +789,7 @@ def plan_units(wt: Path, head: str, recs: list[FileRec], cfg: dict, force_single
         u.docs_files = [r.path for r in recs if r.kind == "docs"]
         return [u]
 
-    depth = int(cfg.get("unit_depth", 2))
+    depth = UNIT_DEPTH
     roots = package_roots(wt, head)
     code = [r for r in reviewable if r.kind == "code"]
     groups: dict[str, list[FileRec]] = {}
@@ -840,20 +831,18 @@ def plan_units(wt: Path, head: str, recs: list[FileRec], cfg: dict, force_single
         if chunk:
             nxt[label(chunk)] = chunk
     groups = nxt
-    # pack small areas: same top-level directory and same sensitivity, in path order
+    # pack small areas: same top-level directory, and low-risk areas apart from the rest, in path order
     areas = sorted(groups)
     packed: list[tuple[str, list[FileRec]]] = []
     bins: dict[tuple[str, bool], tuple[list[str], list[FileRec]]] = {}
 
-    def is_sens(fs):
-        return any(file_sensitivity(f.path, cfg) for f in fs)
     for a in areas:
         fs = groups[a]
         eff = sum(f.effective for f in fs)
         if eff >= UNIT_TARGET * 0.5:
             packed.append((a, fs))
             continue
-        k = (a.split("/")[0], is_sens(fs))
+        k = (a.split("/")[0], low(fs))
         names, cur = bins.get(k, ([], []))
         if cur and sum(f.effective for f in cur) + eff > UNIT_TARGET:
             packed.append((" + ".join(names), cur))
@@ -873,7 +862,7 @@ def plan_units(wt: Path, head: str, recs: list[FileRec], cfg: dict, force_single
             u = best_unit_from(r.path, units, code_files)
             if u is None:
                 u = by_uid.setdefault("u00", Unit(uid="u00", name="tests without code in this PR", files=[],
-                                                   sensitive=False, sensitive_hits=[], effective=0.0))
+                                                   effective=0.0))
             u.files.append(r.path)
             u.test_files += 1
             u.effective += r.effective
@@ -965,4 +954,4 @@ def sizes(recs: list[FileRec]) -> dict:
 
 __all__ = ["FileRec", "Unit", "classify_files", "collect_tests", "tests_block", "seed_diff", "plain_diff",
            "docs_diff", "changed_symbols", "plan_units", "filtered_table", "not_reviewed", "sizes", "size_class",
-           "glob_match", "ws_sensitive", "ATTRS", "NORMAL_MAX", "LARGE_MAX", "TEST_WEIGHT", "DIFF_CAP"]
+           "glob_match", "is_low_risk", "ws_sensitive", "ATTRS", "NORMAL_MAX", "LARGE_MAX", "TEST_WEIGHT", "DIFF_CAP"]
