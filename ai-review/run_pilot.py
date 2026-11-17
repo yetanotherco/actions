@@ -3985,9 +3985,10 @@ def main() -> None:
 
     tm_path = ROOT / cfg["threat_model"]   # an absolute path (--repo-config) stays as is
     if not tm_path.is_file():
-        # optional: most repositories have none
-        log(("WARNING: the config names threat model " if cfg.get("threat_model_set") else "no threat model ")
-            + f"{tm_path.name}, not found: reviewing without one")
+        # optional: most repositories have none. Job log only, never the PR comment
+        log(f"WARNING: the config names threat model {tm_path.name}, which is not there: reviewing with the "
+            "default prompt" if cfg.get("threat_model_set") else
+            "no threat model (optional): reviewing with the default prompt")
     threat = tm_path.read_text() if tm_path.is_file() else "(no threat-model note for this repository)"
     body = (meta.get("body") or "")[:BODY_CAP]
     base_values = {"OUTPUT_SCHEMA": (ROOT / "schema" / "findings.json").read_text().strip(),
