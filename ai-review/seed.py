@@ -805,7 +805,9 @@ MAL_PATTERNS = [
                                      r'https?://[^\s"\']+\.(tgz|tar\.gz)\b'), "all"),
     ("network host", re.compile(r"https?://(?!localhost\b|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "dev"),
 ]
-MAL_INPUT_CAP = 150_000   # chars of diff for the check (tests and dev files; files with hits first)
+# chars of diff for the check (tests and dev files; files with hits first). One direct API call, so Codex's
+# compaction does not apply; DeepSeek Flash takes 1M tokens, and 600k chars cost about a cent.
+MAL_INPUT_CAP = 600_000
 
 
 def is_dev_exec(path: str) -> bool:
@@ -847,14 +849,18 @@ def malicious_scan(wt: Path, mb: str, head: str, recs: list[FileRec], limit: int
 
 
 def malicious_input(wt: Path, mb: str, head: str, recs: list[FileRec], attrs: Path) -> tuple[str, list[dict]]:
-    """The diff the malicious-code check reads (tests and files that run on developer machines; files with a
-    pattern hit first; lockfiles only through their hits) and the pattern hits. ("", hits) when nothing of
-    that kind changed."""
+    """The diff the malicious-code check reads (every changed file but docs and lockfiles, which it sees only
+    through their pattern hits; files with a hit first, then tests and files that run by themselves) and
+    the pattern hits. ("", []) when only product code changed and nothing matched."""
     hits = malicious_scan(wt, mb, head, recs)
     hit_files = {h["file"] for h in hits}
+    # the whole diff, so a harmful helper in product code called from an innocent-looking test line is seen
+    # too: files with a hit first, then tests and files that run by themselves, then the rest
     pick = [r for r in recs if not r.binary and r.kind != "docs" and not _ODD_NAME.search(r.path) and r.reason not in (
-        "lockfile", "outside --paths") and (r.kind == "test" or is_dev_exec(r.path) or r.path in hit_files)]
-    pick.sort(key=lambda r: (r.path not in hit_files, r.path))
+        "lockfile", "outside --paths")]
+    if not any(r.kind == "test" or is_dev_exec(r.path) for r in pick) and not hits:
+        return "", hits   # only product code changed: the security reviewers have it
+    pick.sort(key=lambda r: (r.path not in hit_files, not (r.kind == "test" or is_dev_exec(r.path)), r.path))
     out, used = [], 0
     for r in pick:
         d = git(wt, "diff", "--no-color", "--no-ext-diff", "-U3", "-M", mb, head, "--", *_pathspecs([r]), attrs=attrs)
