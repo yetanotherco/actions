@@ -243,7 +243,7 @@ jobs:
     with:
       command: /review
     secrets:
-      OPENROUTER_API_KEY: ${{ secrets.AI_REVIEW_OPENROUTER_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
