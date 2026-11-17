@@ -16,6 +16,8 @@ and the plain `-U3` diff used by the static-diff comparison mode.
 
 from __future__ import annotations
 
+import fnmatch
+import posixpath
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -875,6 +877,295 @@ def malicious_input(wt: Path, mb: str, head: str, recs: list[FileRec], attrs: Pa
 
 
 # --------------------------------------------------------------------------------------
+# housekeeping hints: a scripted pre-check (no model) whose output the housekeeping lane confirms or drops
+
+
+HK_HINT_LIMIT = 40   # per section
+# a reference in a changed file must name a file with one of these extensions, or a directory (trailing /)
+_HK_PATH_EXTS = {"md", "markdown", "rst", "txt", "adoc", "toml", "yml", "yaml", "json", "jsonl", "ini", "cfg", "conf",
+                 "env", "sh", "bash", "zsh", "py", "rs", "go", "sol", "ts", "tsx", "js", "mjs", "cjs", "jsx", "c",
+                 "h", "cpp", "hpp", "java", "kt", "rb", "ex", "exs", "lua", "sql", "proto", "graphql", "html", "css",
+                 "svg", "png", "jpg", "pdf", "lock", "mk", "nix", "tf", "hcl", "service", "rules", "pem", "csv",
+                 "typ", "dockerfile", "example"}
+_HK_DOC_EXTS = {"md", "markdown", "rst", "adoc", "typ"}
+_HK_CONFIG_EXTS = {".toml", ".yml", ".yaml", ".ini", ".cfg", ".conf", ".sh", ".bash", ".zsh", ".mk", ".env",
+                   ".service", ".rules", ".example", ".nix", ".tf", ".hcl"}
+_HK_CODE_COMMENT = re.compile(r"^\s*(#|//|/\*|\*|--|;|<!--)")
+_HK_QUOTED = re.compile(r"`([^`\s]{3,200})`|\"([^\"\s]{3,200})\"|'([^'\s]{3,200})'|\]\(([^)\s]{3,200})\)")
+_HK_BARE = re.compile(r"(?<![\w/.~$@:-])((?:\.\.?/)?[\w.-]*[A-Za-z][\w.-]*(?:/[\w.-]+)*/?)")
+_HK_DOMAIN = re.compile(r"^[\w-]+(\.[\w-]+)*\.(com|org|io|net|dev|ai|sh|rs|xyz|co|app|so|gg|me|info)$", re.I)
+_HK_NOT_FILES = {"node.js", "next.js", "vue.js", "socket.io", "e.g.", "i.e.", "etc."}
+_HK_MAKE = re.compile(r"(?:^|[\s;&|(`'\"$>])make\s+([^\n`'\";&|)#]*)")
+_HK_MAKE_STOP = {"sure", "it", "its", "the", "a", "an", "this", "that", "these", "those", "them", "they", "use",
+                 "sense", "any", "all", "some", "your", "our", "one", "no", "not", "certain", "room", "way", "do",
+                 "is", "and", "or", "to", "of", "in", "on", "for", "with", "as", "more", "less", "every", "each",
+                 "both", "progress", "changes", "things", "calls", "requests", "us", "you", "me", "him", "her", "so",
+                 "up", "out", "can", "will", "should", "must", "would", "could", "only", "also", "again", "new",
+                 "sure,", "there", "here", "what", "which", "who", "how", "when", "if", "then", "than", "lanes",
+                 "money", "life", "do,", "own"}
+_HK_RULE = re.compile(r"^([^\s#=:][^=:#]*?)\s*::?(?!=)")
+_HK_DEFS = {
+    ".py": [re.compile(r"^(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\("), re.compile(r"^class\s+([A-Za-z_]\w*)"),
+            re.compile(r"^([A-Z][A-Z0-9_]*)\s*(?::[^=]+)?=(?!=)")],
+    ".rs": [re.compile(r"^(?:pub\((?:crate|super)\)\s+)?(?:(?:const|async|unsafe)\s+)*fn\s+(\w+)"),
+            re.compile(r"^(?:pub\((?:crate|super)\)\s+)?(?:const|static)\s+([A-Z][A-Z0-9_]*)\s*:"),
+            re.compile(r"^(?:pub\((?:crate|super)\)\s+)?(?:struct|enum|trait|type)\s+(\w+)")],
+    ".go": [re.compile(r"^func\s+([a-z]\w*)\s*\("), re.compile(r"^(?:const|var)\s+([a-z]\w*)\b")],
+    ".sh": [re.compile(r"^(?:function\s+)?([A-Za-z_]\w*)\s*\(\)\s*\{?")],
+}
+for _e in (".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx"):   # exported names are public API: left out
+    _HK_DEFS[_e] = [re.compile(r"^(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)"),
+                    re.compile(r"^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=")]
+_HK_DEFS[".bash"] = _HK_DEFS[".sh"]
+_HK_SKIP_NAMES = {"main", "new", "default", "init", "setup", "teardown", "setUp", "tearDown", "run", "app", "fmt",
+                  "from", "drop", "handler", "lambda_handler", "build", "configure", "pytest_configure"}
+
+
+def _added_lines(wt: Path, mb: str, head: str, recs: list[FileRec]) -> list[tuple[str, int, str]]:
+    """(path, head line, text) of every added line in recs."""
+    if not recs:
+        return []
+    diff = git(wt, "diff", "--no-color", "--no-ext-diff", "-U0", "-M", mb, head, "--", *_pathspecs(recs))
+    out, path, line = [], None, 0
+    for ln in diff.splitlines():
+        if ln.startswith("+++ "):
+            path = ln[6:] if ln.startswith("+++ b/") else None
+            continue
+        m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", ln)
+        if m:
+            line = int(m.group(1))
+            continue
+        if path is not None and ln.startswith("+"):
+            out.append((path, line, ln[1:]))
+            line += 1
+    return out
+
+
+def _gitignore_rules(wt: Path, head: str, files: list[str]) -> list[tuple[str, str, bool, bool, bool]]:
+    """(dir, pattern, negated, anchored, dir_only) of every .gitignore at head, in order."""
+    rules = []
+    for f in sorted((f for f in files if PurePosixPath(f).name == ".gitignore"), key=lambda f: f.count("/")):
+        d = str(PurePosixPath(f).parent).lstrip(".")
+        for raw in git(wt, "show", f"{head}:{f}", check=False).splitlines():
+            p = raw.strip()
+            if not p or p.startswith("#"):
+                continue
+            neg = p.startswith("!")
+            p = p.lstrip("!")
+            dir_only = p.endswith("/")
+            p = p.strip("/")
+            rules.append((d, p, neg, "/" in p or raw.strip().lstrip("!").startswith("/"), dir_only))
+    return rules
+
+
+def _ignored(path: str, rules: list) -> bool:
+    hit = False
+    for d, p, neg, anchored, _ in rules:
+        if d and not path.startswith(d + "/"):
+            continue
+        rel = path[len(d) + 1:] if d else path
+        parts = rel.split("/")
+        if anchored:
+            m = any(fnmatch.fnmatchcase("/".join(parts[:i]), p) for i in range(1, len(parts) + 1))
+        else:
+            m = any(fnmatch.fnmatchcase(c, p) for c in parts)
+        if m:
+            hit = not neg
+    return hit
+
+
+def _path_ref(tok: str, bare: bool) -> str | None:
+    """The path `tok` names, or None when it does not look like a path in the repository."""
+    tok = tok.strip().rstrip(".,;:)!?")
+    tok = re.sub(r"(#[\w-]*|:\d+(-\d+)?|\?.*)$", "", tok)
+    if (len(tok) < 3 or "://" in tok or tok[0] in "/~$-@<%+" or any(c in tok for c in "*?[]{}<>$%=,|\\()!&'\"")
+            or "..." in tok or not re.search(r"[A-Za-z]", tok) or tok.lower() in _HK_NOT_FILES):
+        return None
+    while tok.startswith("./"):
+        tok = tok[2:]
+    first = tok.split("/")[0]
+    if _HK_DOMAIN.match(first) or (re.fullmatch(r"v?\d+(\.\d+)*", first)):
+        return None
+    last = tok.rstrip("/").split("/")[-1]
+    ext = last.rsplit(".", 1)[-1].lower() if "." in last.lstrip(".") else ""
+    if tok.endswith("/"):   # a directory: quoted, with a parent (`vendor/`, `target/` are mostly generic)
+        return tok if "/" in tok.rstrip("/") and not bare else None
+    if ext not in _HK_PATH_EXTS or ("/" not in tok and ext not in _HK_DOC_EXTS):
+        return None   # a bare file name: only a document (`summary.json` is mostly an output)
+    if re.fullmatch(r"[\d.]+[a-z]*", last.lower()):   # 1.2.toml, versions
+        return None
+    return tok
+
+
+def _path_exists(ref: str, src: str, files: set[str], dirs: set[str], names: set[str], rules: list,
+                 tails: set[str]) -> bool:
+    r = ref.rstrip("/")
+    cands = {posixpath.normpath(r), posixpath.normpath(posixpath.join(posixpath.dirname(src), r))}
+    for c in cands:
+        if c.startswith("../") or c == "..":
+            return True   # outside the repository: cannot tell
+        if c in files or c in dirs or _ignored(c, rules):
+            return True
+    if "/" not in r:
+        return r in names
+    # a path under a prefix the repository does not have (a checkout dir, `owner/repo/`): the rest exists
+    parts = posixpath.normpath(r).split("/")
+    for i in range(len(parts) - 1):
+        rest = "/".join(parts[i:])
+        if rest in tails:
+            return True
+    return False
+
+
+def _make_targets(wt: Path, head: str, files: list[str]) -> tuple[set[str], list[str]] | None:
+    """(targets, pattern targets) of every Makefile at head; None when the repository has none."""
+    mks = [f for f in files if PurePosixPath(f).name in WS_NAMES or f.endswith(".mk")]
+    if not mks:
+        return None
+    targets, patterns = set(), []
+    for f in mks:
+        text = git(wt, "show", f"{head}:{f}", check=False).replace("\\\n", " ")
+        for ln in text.splitlines():
+            if ln.startswith("\t"):
+                continue
+            m = _HK_RULE.match(ln)
+            if not m:
+                continue
+            names = m.group(1).split()
+            if names and names[0] == ".PHONY":
+                names = ln.split(":", 1)[1].split()
+            for t in names:
+                if "%" in t:
+                    patterns.append(t)
+                elif "$" not in t:
+                    targets.add(t)
+    return targets, patterns
+
+
+def housekeeping_scan(wt: Path, mb: str, head: str, recs: list[FileRec]) -> dict:
+    """Leads for the housekeeping lane, from the lines the PR adds (code, docs and config; not tests,
+    vendored, generated or ignored files): {"missing": [{"ref", "kind": "path"|"make", "at": [file:line]}],
+    "unreferenced": [{"name", "at"}]}. Paths must look like files (known extension) or directories
+    (trailing /); a path the head tree has, or a .gitignore covers, is not reported."""
+    scan = [r for r in recs if r.kind in ("code", "docs") and not r.binary and r.status != "D"
+            and not _ODD_NAME.search(r.path)]
+    added = _added_lines(wt, mb, head, scan)
+    tree = git(wt, "ls-tree", "-r", "-t", "-z", "--name-only", head).split("\0")
+    files_l = git(wt, "ls-tree", "-r", "-z", "--name-only", head).split("\0")
+    files = set(filter(None, files_l))
+    dirs = set(filter(None, tree)) - files
+    names = {PurePosixPath(f).name for f in files} | {PurePosixPath(d).name for d in dirs}
+    tails = {"/".join(p.split("/")[i:]) for p in files | dirs for i in range(p.count("/") + 1)}
+    rules = _gitignore_rules(wt, head, files_l)
+    mk = _make_targets(wt, head, files_l)
+    kinds = {r.path: r.kind for r in recs}
+    missing: dict[tuple[str, str], list[str]] = {}
+    in_fence: dict[str, bool] = {}
+    for path, line, text in added:
+        pp = PurePosixPath(path)
+        is_doc = kinds.get(path) == "docs"
+        is_cfg = pp.suffix.lower() in _HK_CONFIG_EXTS or pp.name in WS_NAMES or pp.name.startswith("Dockerfile")
+        comment = bool(_HK_CODE_COMMENT.match(text))
+        if is_doc and text.lstrip().startswith(("```", "~~~")):
+            in_fence[path] = not in_fence.get(path, False)
+            continue
+        fence = in_fence.get(path, False)
+        cands = []
+        # module paths (imports) resolve through remappings and search paths, not the tree
+        is_import = not is_doc and re.match(r"\s*(import|from|use|require|#include|@import)\b", text)
+        for m in () if is_import else _HK_QUOTED.finditer(text):
+            tok = next(g for g in m.groups() if g is not None)
+            # a string literal in code: only a path with a directory part (a bare name is often an output)
+            if not (is_doc or is_cfg or comment) and "/" not in tok:
+                continue
+            cands.append((tok, False))
+        if is_doc or is_cfg or comment or fence:
+            cands += [(m.group(1), True) for m in _HK_BARE.finditer(_HK_QUOTED.sub(" ", text))
+                      if "." in m.group(1) or "/" in m.group(1)]
+        for tok, bare in cands:
+            ref = _path_ref(tok, bare)
+            if ref and not _path_exists(ref, path, files, dirs, names, rules, tails):
+                missing.setdefault((ref, "path"), []).append(f"{path}:{line}")
+        if mk is None:
+            continue
+        for m in _HK_MAKE.finditer(text):
+            before = text[:m.start(1)]
+            in_code = fence or before.count("`") % 2 == 1 or re.match(r"\s*(?:[-*]\s+)?(?:\$\s+)?(?:run:\s*)?make\s",
+                                                                       text)
+            if not (in_code or (is_cfg and not comment)):   # prose ("make sure ...") and code are left out
+                continue
+            toks, skip = m.group(1).split(), False
+            for t in toks:
+                if skip:
+                    skip = False
+                    continue
+                if t in ("-C", "-f", "--directory", "--file"):
+                    skip = True
+                    continue
+                if t.startswith("-") or "=" in t:
+                    continue
+                if not re.fullmatch(r"[a-z0-9][\w.-]*", t) or t in _HK_MAKE_STOP:
+                    break
+                if t not in mk[0] and not any(fnmatch.fnmatchcase(t, p.replace("%", "*")) for p in mk[1]):
+                    missing.setdefault((t, "make"), []).append(f"{path}:{line}")
+    # names the PR adds at module level that nothing else in the repository (head) mentions
+    defs: dict[str, list[str]] = {}
+    for path, line, text in added:
+        if kinds.get(path) != "code":
+            continue
+        for rx in _HK_DEFS.get(PurePosixPath(path).suffix.lower(), []):
+            m = rx.match(text)
+            if m and m.group(1) not in _HK_SKIP_NAMES and not m.group(1).startswith(("test", "Test", "__")) \
+                    and len(m.group(1)) > 2:
+                defs.setdefault(m.group(1), []).append(f"{path}:{line}")
+                break
+    unreferenced = []
+    if defs:
+        def counts(rev: str) -> dict[str, int]:
+            c: dict[str, int] = {}
+            names_ = sorted(defs)
+            for i in range(0, len(names_), 200):
+                args = [a for n in names_[i:i + 200] for a in ("-e", n)]
+                out = git(wt, "grep", "-I", "-o", "-w", "-F", "--no-color", *args, rev, "--", ".", check=False)
+                for ln in out.splitlines():
+                    tok = ln.rsplit(":", 1)[-1]
+                    c[tok] = c.get(tok, 0) + 1
+            return c
+        at_head, at_base = counts(head), counts(mb)
+        for n, at in sorted(defs.items(), key=lambda kv: kv[1][0]):
+            if not at_base.get(n) and at_head.get(n, 0) <= len(at):
+                unreferenced.append({"name": n, "at": at[:3]})
+    miss = [{"ref": r, "kind": k, "at": at[:3], "count": len(at)} for (r, k), at in missing.items()]
+    miss.sort(key=lambda x: x["at"][0])
+    return {"missing": miss[:HK_HINT_LIMIT], "missing_more": max(len(miss) - HK_HINT_LIMIT, 0),
+            "unreferenced": unreferenced[:HK_HINT_LIMIT],
+            "unreferenced_more": max(len(unreferenced) - HK_HINT_LIMIT, 0)}
+
+
+def housekeeping_hints_text(scan: dict) -> str:
+    """The scan as the <scripted_hints> block of the housekeeping prompt."""
+    if not scan or not (scan.get("missing") or scan.get("unreferenced")):
+        return "(none: the script found no missing path or make target and no unreferenced new name)"
+    out = ["Found by a script with no model, from the lines this PR adds. Leads, not findings: it can be wrong "
+           "(a path created at runtime, a name used through reflection). Confirm each one before you report it."]
+    if scan.get("missing"):
+        out.append("Referenced in the PR but not in the repository at the PR head:")
+        for x in scan["missing"]:
+            what = f"`make {x['ref']}`: no Makefile defines the target" if x["kind"] == "make" else f"`{x['ref']}`"
+            more = f" (+{x['count'] - len(x['at'])} more)" if x["count"] > len(x["at"]) else ""
+            out.append(f"- {what} (at {', '.join(x['at'])}{more})")
+        if scan.get("missing_more"):
+            out.append(f"- [... {scan['missing_more']} more]")
+    if scan.get("unreferenced"):
+        out.append("Defined by this PR and referenced nowhere else in the repository (unused leftover?):")
+        for x in scan["unreferenced"]:
+            out.append(f"- `{x['name']}` ({', '.join(x['at'])})")
+        if scan.get("unreferenced_more"):
+            out.append(f"- [... {scan['unreferenced_more']} more]")
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------------------
 # summaries
 
 
@@ -929,4 +1220,4 @@ def sizes(recs: list[FileRec]) -> dict:
 
 __all__ = ["FileRec", "Unit", "classify_files", "collect_tests", "tests_block", "seed_diff", "plain_diff",
            "docs_diff", "changed_symbols", "plan_units", "filtered_table", "not_reviewed", "sizes", "size_class",
-           "glob_match", "is_low_risk", "malicious_scan", "malicious_input", "ws_sensitive", "ATTRS", "MAX_EFFECTIVE", "TEST_WEIGHT", "DIFF_CAP"]
+           "glob_match", "is_low_risk", "malicious_scan", "malicious_input", "housekeeping_scan", "housekeeping_hints_text", "ws_sensitive", "ATTRS", "MAX_EFFECTIVE", "TEST_WEIGHT", "DIFF_CAP"]

@@ -3224,6 +3224,11 @@ def build_plan(args, meta: dict, wt: Path, mb: str, head: str, cfg: dict, scratc
     for u in units:
         u.effective = sum(by_path[p].effective for p in u.files)
     mal_diff, mal_hits = seedlib.malicious_input(wt, mb, head, recs, attrs)
+    try:   # leads for the housekeeping lane: missing paths and make targets, unreferenced new names
+        hk_scan = seedlib.housekeeping_scan(wt, mb, head, recs)
+    except Exception as e:  # noqa: BLE001 - a scan failure only means no hints
+        log(f"housekeeping scan failed: {mask(str(e))[:200]}")
+        hk_scan = {}
     # the triage input, for a low-risk PR
     triage_in = ""
     if any(u.lanes and u.low_risk for u in units):
@@ -3234,6 +3239,7 @@ def build_plan(args, meta: dict, wt: Path, mb: str, head: str, cfg: dict, scratc
             "leftover_docs_diff": seedlib.docs_diff(wt, mb, head, leftover_docs, attrs) if leftover_docs else "",
             "leftover_docs": [r.path for r in leftover_docs],
             "triage_input": triage_in, "malicious": {"diff": mal_diff, "hits": mal_hits}, "paths": paths,
+            "housekeeping_scan": hk_scan, "housekeeping_hints": seedlib.housekeeping_hints_text(hk_scan),
             "attrs": attrs, "not_reviewed": not_reviewed}
 
 
@@ -4155,6 +4161,7 @@ def main() -> None:
                                        "units": [u.__dict__ for u in units],
                                        "files": [r.__dict__ for r in plan["recs"]],
                                        "leftover_docs": plan["leftover_docs"],
+                                       "housekeeping_scan": plan["housekeeping_scan"],
                                        "seed_omitted": {uid: d["seed_omitted"] for uid, d in plan["unit_data"].items()
                                                         if d.get("seed_omitted")},
                                        "seed_notes": {uid: d.get("seed_note") for uid, d in plan["unit_data"].items()
