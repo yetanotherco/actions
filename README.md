@@ -35,16 +35,23 @@ on:
   issue_comment:
     types: [created]
 
+permissions: {}
+
 jobs:
   claude-review:
     if: |
       (github.event_name == 'pull_request' &&
+       github.event.pull_request.draft == false &&
        github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request &&
-       contains(github.event.comment.body, '/claude') &&
+       startsWith(github.event.comment.body, '/claude') &&
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
@@ -76,16 +83,23 @@ on:
   issue_comment:
     types: [created]
 
+permissions: {}
+
 jobs:
   codex-review:
     if: |
       (github.event_name == 'pull_request' &&
+       github.event.pull_request.draft == false &&
        github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request &&
-       contains(github.event.comment.body, '/codex') &&
+       startsWith(github.event.comment.body, '/codex') &&
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     uses: yetanotherco/actions/.github/workflows/pr_review_codex.yml@main
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
@@ -118,16 +132,22 @@ on:
   issue_comment:
     types: [created]
 
+permissions: {}
+
 jobs:
   kimi-review:
     if: |
       (github.event_name == 'pull_request' &&
+       github.event.pull_request.draft == false &&
        github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request &&
-       contains(github.event.comment.body, '/kimi') &&
+       startsWith(github.event.comment.body, '/kimi') &&
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     uses: yetanotherco/actions/.github/workflows/pr_review_kimi.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
     secrets:
       KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
 ```
@@ -163,16 +183,22 @@ on:
   issue_comment:
     types: [created]
 
+permissions: {}
+
 jobs:
   deepseek-review:
     if: |
       (github.event_name == 'pull_request' &&
+       github.event.pull_request.draft == false &&
        github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request &&
-       contains(github.event.comment.body, '/deepseek') &&
+       startsWith(github.event.comment.body, '/deepseek') &&
        contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     uses: yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
     with:
       model: deepseek/deepseek-v4-pro-0813
       reasoning_effort: high
@@ -352,15 +378,17 @@ uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@<tag commit SH
 
 ## Triggering Reviews
 
-All workflows support two trigger methods:
+The caller's workflow file chooses the triggers. The single-model examples above use two:
 
-1. **Automatic on PR** - Runs when a PR is opened or marked ready for review
+1. **Automatic on PR** - Runs when a PR is opened or marked ready for review (not drafts)
 2. **Manual via comment** - Comment on a PR to trigger a review:
    - `/claude` - Claude PR Review (custom prompt)
    - `/codex` - Codex PR Review
    - `/kimi` - Kimi PR Review
    - `/deepseek`, `/grok`, `/gemini` - OpenRouter PR Review, with the commands from the OpenRouter table
    - In this repository, `/review` runs the [multi-model review](#multi-model-pr-review); callers choose their own command
+
+The multi-model review costs a few dollars per run, so its example runs only on demand: a comment, or a label.
 
 Only repository owners, members, and collaborators can trigger reviews via comments.
 
