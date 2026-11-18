@@ -1536,6 +1536,39 @@ def save_codex_trace(home: Path, dest: Path) -> dict:
             "window": max(windows, default=0)}
 
 
+def served_by(ids: list[str], key: str, requests_path: Path, limit: int = 150) -> dict[str, int]:
+    """Which provider served each of a Codex lane's model responses: OpenRouter's generation lookup (free) per
+    response id. Adds one {"kind": "generation", "id", "provider"} row per id to requests.jsonl and returns
+    {provider: responses}, most first ("?" = lookup failed). Never raises."""
+    ids = list(dict.fromkeys(ids))[:limit]
+    if not ids:
+        return {}
+
+    def one(gid: str) -> str:
+        for attempt in range(2):   # the generation's stats can lag the response by a few seconds
+            try:
+                d = http_json(f"{OR_API}/generation?id={urllib.parse.quote(gid)}", key, timeout=30).get("data") or {}
+                if d.get("provider_name"):
+                    return str(d["provider_name"])
+            except Exception:  # noqa: BLE001
+                pass
+            if not attempt:
+                time.sleep(3)
+        return "?"
+
+    with cf.ThreadPoolExecutor(8) as ex:
+        provs = list(ex.map(one, ids))
+    try:
+        with open(requests_path, "a") as f:
+            f.writelines(json.dumps({"kind": "generation", "id": g, "provider": p}) + "\n" for g, p in zip(ids, provs))
+    except OSError:
+        pass
+    counts: dict[str, int] = {}
+    for p in provs:
+        counts[p] = counts.get(p, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+
+
 RETRY_ANSWER_PROMPT = ("Your last turn ended without an answer. Do not run more commands: write your final "
                        "answer now, only the single JSON object described in the first message.")
 RETRY_TIMEOUT_S = 10 * 60
@@ -1583,7 +1616,9 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
     home = codex_home_for(out_dir / "codex_home", model, prices, zdotdir if soft else None, [wt, zdotdir],
                           sent_model)
     env = base_env()
-    env.update({"CODEX_HOME": str(home), "OPENROUTER_API_KEY": key})
+    # feedback_tags=info: one `last_model_response_id="gen-..."` line per model response (OpenRouter's generation
+    # id; checked 2026-11-18 against a local stub), looked up afterwards for the provider that served it
+    env.update({"CODEX_HOME": str(home), "OPENROUTER_API_KEY": key, "RUST_LOG": "error,feedback_tags=info"})
     last = out_dir / "last_message.txt"
     enforced = model.startswith(SCHEMA_ENFORCED_PREFIXES)
     schema_args = ["--output-schema", str(schema_path)] if enforced else []
@@ -1686,6 +1721,10 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
         res["computed_cost"] = round(tail.estimated_cost(), 6)
         res["warnings"].append("computed cost is an ESTIMATE: the lane ended before Codex reported usage")
     res["final_text"] = codex_final_text(out_dir / "events.jsonl", last)
+    served = served_by(re.findall(r'last_model_response_id="([^"]+)"', stderr), key, out_dir / "requests.jsonl")
+    if served:
+        res["served_by"] = served
+        res["warnings"].append("served by " + ", ".join(f"{p} {n}" for p, n in served.items()))
     if retried:
         res["warnings"].append("empty answer; asked once more for the answer"
                                + ("" if res["final_text"].strip() else ", still empty"))
@@ -1695,7 +1734,8 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
         res["status"], res["error"] = "failed", f"timeout after {timeout}s"
     elif rc != 0:
         res["status"] = "failed"
-        res["error"] = (errors[-1] if errors else stderr.strip().splitlines()[-1:] or ["exit != 0"])
+        res["error"] = (errors[-1] if errors else [ln for ln in stderr.strip().splitlines()
+                                                    if " feedback_tags: " not in ln][-1:] or ["exit != 0"])
         res["error"] = mask(str(res["error"]))[:400]
     else:
         res["status"] = "ok"
