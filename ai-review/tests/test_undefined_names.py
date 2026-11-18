@@ -25,7 +25,7 @@ def undefined(module_name: str) -> list[str]:
 
     def walk(t: symtable.SymbolTable) -> None:
         # module-level code already ran on import; only function bodies can hide a missing name
-        for s in (t.get_symbols() if t.get_type() != symtable.SymbolTableType.MODULE else []):
+        for s in (t.get_symbols() if t.get_type() != "module" else []):
             if s.is_referenced() and s.is_global() and s.get_name() not in known:
                 out.append(f"{path.name}: {t.get_name()} line {t.get_lineno()}: {s.get_name()}")
         for c in t.get_children():
