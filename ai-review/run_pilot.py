@@ -2171,10 +2171,15 @@ def housekeeping_items(ctx: dict) -> list[dict]:
     return [it for r in ctx.get("aux_rows", []) if r.get("lane") == "housekeeping" for it in r.get("housekeeping") or []]
 
 
+def verified_severities(verify_min: str) -> list[str]:
+    """The severities the judge checks with --verify-min, most severe first."""
+    return [s for s in SEVERITIES if SEV_RANK[s] <= SEV_RANK[verify_min]]
+
+
 def verification_queue(merged: list[dict], verify_min: str) -> list[dict]:
     """The findings the judge checks, most severe first so --max-verify and the budget cut the least severe
     ones. Docs findings are judged too. The rest get the reason they were skipped."""
-    sev_ok = {s for s in SEVERITIES if SEV_RANK[s] <= SEV_RANK[verify_min]}
+    sev_ok = verified_severities(verify_min)
     queue = sorted((f for f in merged if f["severity"] in sev_ok), key=lambda f: SEV_RANK.get(f["severity"], 9))
     for f in merged:
         if f not in queue:
@@ -4178,7 +4183,7 @@ def main() -> None:
     ap.add_argument("--docs-lane", action="store_true",
                     help="also run the old diff-only stale-comment lane (replaced by the housekeeping lane)")
     ap.add_argument("--verify-min", choices=SEVERITIES, default="low",
-                    help="verify merged findings of this severity and above (default low: all; docs never). "
+                    help="verify merged findings of this severity and above (default low: all). "
                          "With --verify-each, medium/low go to GPT unless GPT reported them")
     ap.add_argument("--max-verify", type=int, default=60,
                     help="most findings verified per run, most severe first (default 60)")
@@ -5103,7 +5108,7 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
                         f"{(f['verification'].get('applied') or {}).get('verdict', f['verification'].get('error', ''))}")
             n_ok = sum(1 for f in to_verify if f["verification"]["status"] == "ok")
             verify_note = verify_note or (f"{n_ok} of {len(to_verify)} finding(s) judged in one {jl} session per unit "
-                                          f"(severity {'/'.join(s for s in SEVERITIES if s in sev_ok)})")
+                                          f"(severity {'/'.join(verified_severities(args.verify_min))})")
         elif to_verify:
             log(f"verifying {len(to_verify)} finding(s)")
             by_uid = {u.uid: u for u in units}
@@ -5128,7 +5133,7 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
                 aux_rows.append(v)
                 log(f"verify {f['mid']} by {v.get('verifier')}: {v['status']} "
                     f"{(v.get('applied') or {}).get('verdict', v.get('error', ''))}")
-            verify_note = verify_note or (f"{len(to_verify)} finding(s) verified (severity {'/'.join(sorted(sev_ok))})")
+            verify_note = verify_note or (f"{len(to_verify)} finding(s) verified (severity {'/'.join(verified_severities(args.verify_min))})")
         elif not verify_note:
             verify_note = "no findings at the verification threshold"
     except BaseException as e:  # noqa: BLE001 - Ctrl-C / SIGTERM / bug: stop lanes, still account for spend
