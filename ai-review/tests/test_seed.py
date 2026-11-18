@@ -250,6 +250,21 @@ class MaliciousScan(RepoCase):
         self.assertEqual(len(hits), 300)
         self.assertEqual((hits[0]["file"], hits[0]["kind"]), ("café/package-lock.json", "dependency source"))
 
+    def test_files_too_big_to_read_make_it_partial(self):
+        with mock.patch.object(seed, "MAL_INPUT_CAP", 200):
+            mb, h = self.pr({"tests/a.test.ts": "x\n", "tests/z_big.test.ts": "x\n"},
+                            {"tests/a.test.ts": "y\n", "tests/z_big.test.ts": "".join(f"l{i}\n" for i in range(99))})
+            recs = seed.classify_files(self.repo.path, mb, h, {}, None)
+            diff, _ = seed.malicious_input(self.repo.path, mb, h, recs, self.attrs)
+        omitted = seed.malicious_omitted(diff)
+        self.assertEqual(omitted, ["tests/z_big.test.ts"])
+        row = {"lane": "malicious", "status": "ok", "malicious": [], "omitted": omitted}
+        (line,) = rp.malicious_lines({"aux_rows": [row]})
+        self.assertIn("**Malicious-code check was partial**: 1 file(s) too big to read", line)
+        self.assertIn("`tests/z_big.test.ts`", line)
+        self.assertIn("nothing found in the rest", line)
+        self.assertEqual(seed.malicious_omitted("+[... not read: fake: diff not shown\n"), [])   # not forgeable
+
     def test_nothing_to_check_when_only_product_code_changed(self):
         mb, h = self.pr({"src/a.rs": "fn a() {}\n"}, {"src/a.rs": "fn a() { 1 }\n"})
         recs = seed.classify_files(self.repo.path, mb, h, {}, None)

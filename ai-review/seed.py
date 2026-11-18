@@ -816,6 +816,16 @@ MAL_PATTERNS = [
 MAL_INPUT_CAP = 600_000
 
 
+_MAL_OMITTED_MARK = "[... not read:"
+
+
+def malicious_omitted(diff: str) -> list[str]:
+    """Files malicious_input left out of the check's diff (over MAL_INPUT_CAP). A diff line never starts
+    with "[" (each starts with a space, +, -, @, or a header word), so the marks cannot be forged."""
+    return [ln[len(_MAL_OMITTED_MARK) + 1:].rsplit(": diff not shown", 1)[0]
+            for ln in diff.splitlines() if ln.startswith(_MAL_OMITTED_MARK + " ")]
+
+
 def is_dev_exec(path: str) -> bool:
     return glob_match(path, DEV_EXEC_GLOBS) is not None
 
@@ -874,7 +884,7 @@ def malicious_input(wt: Path, mb: str, head: str, recs: list[FileRec], attrs: Pa
     for r in pick:
         d = git(wt, "diff", "--no-color", "--no-ext-diff", "-U3", "-M", mb, head, "--", *_pathspecs([r]), attrs=attrs)
         if used + len(d) > MAL_INPUT_CAP:
-            out.append(f"[... {r.path}: diff not shown (over {MAL_INPUT_CAP:,} chars); read it in the checkout]\n")
+            out.append(f"{_MAL_OMITTED_MARK} {r.path}: diff not shown (over {MAL_INPUT_CAP:,} chars); read it in the checkout]\n")
             continue
         out.append(d)
         used += len(d)

@@ -3328,7 +3328,8 @@ def build_plan(args, meta: dict, wt: Path, mb: str, head: str, cfg: dict, scratc
             "too_big": sizes["class"] == "too big",
             "leftover_docs_diff": seedlib.docs_diff(wt, mb, head, leftover_docs, attrs) if leftover_docs else "",
             "leftover_docs": [r.path for r in leftover_docs],
-            "triage_input": triage_in, "malicious": {"diff": mal_diff, "hits": mal_hits}, "paths": paths,
+            "triage_input": triage_in, "malicious": {"diff": mal_diff, "hits": mal_hits,
+                                                                 "omitted": seedlib.malicious_omitted(mal_diff)}, "paths": paths,
             "housekeeping_scan": hk_scan,
             "attrs": attrs, "not_reviewed": not_reviewed}
 
@@ -3520,13 +3521,21 @@ def malicious_lines(ctx: dict) -> list[str]:
         return [f"**Malicious-code check failed** ({scope}); check these lines by hand: "
                 + (", ".join(f"`{_cell(h['file'], 100)}:{h['line']}` ({h['kind']})" for h in strong[:10])
                    if strong else "no pattern matched") + "."]
-    items = row.get("malicious") or []
+    items, omitted = row.get("malicious") or [], row.get("omitted") or []
+    partial = ""
+    if omitted:   # too big for its one request: it read only the rest
+        partial = (f"**Malicious-code check was partial**: {len(omitted)} file(s) too big to read, check them by "
+                   "hand: " + ", ".join("`" + _cell(f, 120).replace("`", "'") + "`" for f in omitted[:10])
+                   + (" ..." if len(omitted) > 10 else "") + ".")
     if not items:
-        return [f"Malicious-code check ({scope}): nothing found."]
+        return [partial[:-1] + "; nothing found in the rest." if partial
+                else f"Malicious-code check ({scope}): nothing found."]
     order = {c: i for i, c in enumerate(MALICIOUS_CONFIDENCE)}
     out = ["", f"**⚠️ Possible malicious code aimed at developers or CI: {len(items)}.** Check these before you "
            "run the tests, install dependencies or open the branch in an editor:", "",
            "| Where | What | Evidence | Confidence |", "|---|---|---|---|"]
+    if partial:
+        out.insert(1, partial)
     for it in sorted(items, key=lambda i: order.get(i["confidence"], 9)):
         where = "`" + _cell(f"{it['file']}:{it['line']}", 200).replace("`", "'") + "`"
         out.append(f"| {where} | {_cell(it['what'], 300)} | {_cell(it['evidence'], 200)} | {it['confidence']} |")
@@ -4696,6 +4705,7 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
                 else:
                     row = aux_row("malicious", MALICIOUS_MODEL, None, "; ".join(r["errors"]))
                 row["hits"] = len(mal["hits"])
+                row["omitted"] = mal.get("omitted") or []
                 if r["call"]:
                     row["warnings"] = row.get("warnings", []) + [f"earlier attempt failed: {e}" for e in r["errors"]]
                 return row
