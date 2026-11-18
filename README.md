@@ -1,217 +1,8 @@
 # Reusable GitHub Actions
 
-This repository contains reusable GitHub Actions workflows for AI-powered PR code reviews.
+This repository contains a reusable GitHub Actions workflow for AI-powered PR reviews: `pr_review_multi.yml`, an agentic multi-model security review that posts one comment with findings checked against the code.
 
-## Available Workflows
-
-| Workflow | AI Model | Description |
-|----------|----------|-------------|
-| `pr_review_claude.yml` | Claude (Anthropic) | Uses Claude Code Action with custom prompts |
-| `pr_review_codex.yml` | Codex (OpenAI) | Uses OpenAI Codex Action |
-| `pr_review_kimi.yml` | Kimi (Moonshot AI) | Sends the diff to the Moonshot API |
-| `pr_review_openrouter.yml` | Any OpenRouter model (DeepSeek, Grok, Gemini, ...) | Sends the diff to the OpenRouter API |
-| `pr_review_multi.yml` | Opus, GPT, Kimi, GLM, DeepSeek + a judge | Agentic multi-model security review; one comment with findings checked against the code ([details](#multi-model-pr-review)) |
-
-## Review Prompt
-
-Every single-model workflow takes its review focus from the first of (the multi-model review has its own prompts and a per-repository [config](#repository-config)):
-
-1. The `custom_prompt` input, if set
-2. `.github/prompts/ai-review.md` in your repository, read from the PR's base branch, so a PR cannot change the prompt that reviews it
-3. [`.github/prompts/ai-review.md`](.github/prompts/ai-review.md) in this repository, at the commit your workflow pins
-
-Reading a prompt file fails the review on any error other than the file not existing.
-
-## Usage
-
-### Claude PR Review
-
-```yaml
-name: Claude Code Review
-
-on:
-  pull_request:
-    types: [opened, ready_for_review]
-  issue_comment:
-    types: [created]
-
-jobs:
-  claude-review:
-    if: |
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request &&
-       contains(github.event.comment.body, '/claude') &&
-       contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
-    uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@main
-    secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-```
-
-**Inputs:**
-
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
-| `model` | No | `claude-opus-5-5` | Claude model to use |
-| `max_turns` | No | `30` | Max turns for Claude |
-
-**Secrets:**
-
-| Secret | Required | Description |
-|--------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key |
-
----
-
-### Codex PR Review
-
-```yaml
-name: Codex Code Review
-
-on:
-  pull_request:
-    types: [opened, ready_for_review]
-  issue_comment:
-    types: [created]
-
-jobs:
-  codex-review:
-    if: |
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request &&
-       contains(github.event.comment.body, '/codex') &&
-       contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
-    uses: yetanotherco/actions/.github/workflows/pr_review_codex.yml@main
-    secrets:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-```
-
-**Inputs:**
-
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
-| `model` | No | `gpt-6.1-sol` | Codex model to use |
-
-**Secrets:**
-
-| Secret | Required | Description |
-|--------|----------|-------------|
-| `OPENAI_API_KEY` | Yes | OpenAI API key |
-
----
-
-### Kimi PR Review
-
-Sends the PR diff to the Moonshot API and posts the answer as a PR comment.
-
-```yaml
-name: Kimi Code Review
-
-on:
-  pull_request:
-    types: [opened, ready_for_review]
-  issue_comment:
-    types: [created]
-
-jobs:
-  kimi-review:
-    if: |
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request &&
-       contains(github.event.comment.body, '/kimi') &&
-       contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
-    uses: yetanotherco/actions/.github/workflows/pr_review_kimi.yml@main
-    secrets:
-      KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-```
-
-**Inputs:**
-
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
-| `model` | No | `kimi-k3.1-pro` | Model to use |
-| `reasoning_effort` | No | `high` | Reasoning effort: `low`, `high` or `max` |
-| `max_lines` | No | `10000` | Max lines of diff to review (truncates if larger) |
-| `max_bytes` | No | `2400000` | Max bytes of diff to review, applied after `max_lines` |
-
-**Secrets:**
-
-| Secret | Required | Description |
-|--------|----------|-------------|
-| `KIMI_API_KEY` | Yes | Moonshot API key |
-
----
-
-### OpenRouter PR Reviews (DeepSeek, Grok, Gemini)
-
-Sends the PR diff to any [OpenRouter](https://openrouter.ai/models) model and posts the answer as a PR comment. One `OPENROUTER_API_KEY` covers every model: add one job per model, with the values from the table below. The example uses DeepSeek.
-
-```yaml
-name: DeepSeek Code Review
-
-on:
-  pull_request:
-    types: [opened, ready_for_review]
-  issue_comment:
-    types: [created]
-
-jobs:
-  deepseek-review:
-    if: |
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request &&
-       contains(github.event.comment.body, '/deepseek') &&
-       contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
-    uses: yetanotherco/actions/.github/workflows/pr_review_openrouter.yml@main
-    with:
-      model: deepseek/deepseek-v4-pro-0813
-      reasoning_effort: high
-      max_bytes: 2400000
-    secrets:
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-```
-
-| Model | Command | `reasoning_effort` | `max_bytes` |
-|-------|---------|--------------------|-------------|
-| `deepseek/deepseek-v4-pro-0813` | `/deepseek` | `high` (`max`, `high`, `low`, `none`) | `2400000` (1M context) |
-| `x-ai/grok-4.7` | `/grok` | `medium` (`low`, `medium`, `high`, `xhigh`) | `1200000` (500K context) |
-| `google/gemini-4-argon` | `/gemini` | `medium` (`low`, `medium`, `high`) | `2400000` (1M context) |
-
-**Inputs:**
-
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `custom_prompt` | No | `''` | Review focus; overrides `.github/prompts/ai-review.md` |
-| `model` | Yes | - | OpenRouter model ID (see table) |
-| `reasoning_effort` | No | `medium` | Reasoning effort. OpenRouter maps it to the nearest level the model supports |
-| `max_lines` | No | `10000` | Max lines of diff to review (truncates if larger) |
-| `max_bytes` | No | `1200000` | Max bytes of diff to review, applied after `max_lines`. Raise it for 1M-context models |
-
-**Secrets:**
-
-| Secret | Required | Description |
-|--------|----------|-------------|
-| `OPENROUTER_API_KEY` | Yes | OpenRouter API key |
-
-Requests set `provider.data_collection: deny`, so OpenRouter only routes the diff to providers that don't store or train on it, and `provider.require_parameters: true`, so it skips providers that would ignore the reasoning settings. The job log shows which provider served each review.
-
-### Kimi and OpenRouter notes
-
-The diff comes from git, so PRs over the pulls API's 20000-line diff limit still get reviewed. A truncated diff is flagged in the review comment. A failed API call or a response that stops early posts an error comment and fails the job.
-
----
-
-### Multi-model PR Review
+## Multi-model PR Review
 
 `pr_review_multi.yml` runs a security review with several models and posts **one** comment.
 
@@ -221,7 +12,7 @@ The diff comes from git, so PRs over the pulls API's 20000-line diff limit still
 4. **Merge and judge.** Duplicate findings are merged. A judge (GPT 6.1 Sol) checks the findings against the code, sees every reviewer's claim, and marks each one a bug, suspected, pre-existing, or likely not a problem. The comment says how many it checked; findings it did not reach (more than 60, or over the budget) are marked *unverified*.
 5. **Comment.** It opens with a table of findings to check (severity, status, which models found it, where). Below that come collapsed sections: details, duplicates, pre-existing bugs, findings the judge dismissed (with its reason), and housekeeping. A last line gives what the review cost.
 
-#### Set it up in a repository
+### Set it up in a repository
 
 1. **Secrets.** Make `OPENROUTER_API_KEY` and `ANTHROPIC_API_KEY` available to the repository, preferably as organization secrets so that each repository needs nothing. The secrets table below says what limits to put on them.
 2. **One workflow file.** Copy the example below to `.github/workflows/ai-review.yml` and pin it to a commit (see [Versioning](#versioning)). `v2.0.0` and earlier tags don't have this workflow.
@@ -298,7 +89,7 @@ The comment check matches `/review` alone or followed by options, not words that
 
 The calling job must grant `contents: read`, `pull-requests: write` and `actions: read`. Only the final job, which posts the comment, gets `pull-requests: write`; the jobs that run models get read permissions only. `actions: read` lets `continue` download the earlier review.
 
-#### Repository config
+### Repository config
 
 Both files are optional: a `config.toml` and a `threat_model.md` in `.github/ai-review/` in your repository. They are read from the PR's base branch, so a PR's own changes to them do not apply to its review. (Callers that also trigger on `pull_request` events run the PR's version of their own workflow file, which can change the inputs.) `threat_model` must be the name of a `.md` file in the same directory: the workflow fetches only `*.toml` and `*.md` files. Without a config only the built-in rules below apply.
 
@@ -340,7 +131,7 @@ The keys `sensitive`, `default_sensitive`, `priority`, `nonsensitive_lanes` and 
 
 Most repositories don't need a `threat_model.md`. Add one only when a reviewer can't tell from the code what is attacker-controlled or what the system must guarantee (for a prover: the verifier must reject false proofs). Keep it short and say what matters; don't list what not to report: in our tests, rules like that made the models miss real bugs. See [`.github/ai-review/`](.github/ai-review/) in this repository for an example.
 
-#### Cost and large PRs
+### Cost and large PRs
 
 - **Typical cost:** about $3.40 for a normal PR at API prices, about half of it Opus; about $7–12 near the size limit. The comment's last line shows the cost of each review. In CI this figure is computed from token counts and published prices. The OpenRouter bill is exact, but a key shared by several repositories can't attribute it to one review.
 - **Size limit:** one review covers the whole PR, up to 20,000 *effective* lines: changed code (whitespace-only changes ignored, except in Python, shell, YAML and Makefiles; long deletions compacted) plus half the test lines; docs, lockfiles and generated files do not count. A bigger PR is not reviewed: the comment gives its effective size and asks for it to be split. The reviewers' prompt holds about 600,000 characters of diff (about 15,000 lines of whole functions); above that the largest changes come first and the rest is listed for them to read in the checkout. Changed files that no security reviewer saw (binary to git, whitespace-only changes, unusual file names) are listed at the top of the comment.
@@ -348,63 +139,32 @@ Most repositories don't need a `threat_model.md`. Add one only when a reviewer c
 - **Hard limits:** each reviewer is killed at its lane cap ($3–4 estimated). A watchdog stops the whole review at the PR budget, counting this review's own computed spend (other reviews may share the key). The ceilings the providers enforce are the OpenRouter key's credit limit, for every model but Opus, and the Anthropic workspace's spend limit, for Opus.
 - **Time:** a review takes 15–35 minutes, up to about an hour for a PR near the size limit. The judge is skipped (findings marked unverified) if the reviewers end more than 285 minutes after the start, so the comment is posted inside the job's 330-minute limit.
 
-#### Sandbox check
+### Sandbox check
 
 Before any paid call the runner runs one command in the sandbox of the Codex reviewers (every model but Opus and Fable), with no model, and checks that it works and that it cannot read other processes' environments, where the API keys are. With `sandbox_check: strict` (the default) a failed check stops the review and the comment says why; `warn` only logs it. The check does not cover the Claude Code sandbox that Opus and Fable run in.
 
-#### Provider presets
+### Provider presets
 
 Each OpenRouter model is called through a preset (`model@preset/air-...`, listed in [`ai-review/presets.json`](ai-review/presets.json)). The preset pins the provider, for example Anthropic's and OpenAI's own servers, or full-precision hosts for open models. The runner uses a model's preset only when OpenRouter's live endpoint list, read at the start of the review, shows a host the pin allows (for some open models, also under a price limit). If that check fails, for example because the lookup errors, that reviewer runs unpinned, on any host, for the whole review; the report in the run's artifact marks it `UNPINNED`. Presets belong to an OpenRouter account, so `OPENROUTER_API_KEY` must come from that account. Its privacy setting (no providers that train on prompts) also applies to every key in it.
 
-#### Running it locally
+### Running it locally
 
 `ai-review/run_pilot.py` is the runner the workflow calls. It needs Python 3.11 or newer; `python3 ai-review/run_pilot.py --help` lists its options. It reads the OpenRouter key from `OPENROUTER_API_KEY` when that is set, else from the macOS Keychain. Its defaults are not CI's: CI passes `--isolate shared --claude-auth anthropic --experiment-cap 0 --sandbox-check strict --deadline-min 240` (see `pr_review_multi.yml`), while locally Opus goes through OpenRouter, spend is isolated per reviewer, a $50 cap over all local runs applies, and the sandbox check is off. `--dry-run` shows the parts, the reviewers and the estimated cost without making a paid call.
 
 ---
 
-## Setup
-
-For the multi-model review, follow [Set it up in a repository](#set-it-up-in-a-repository) instead. For the single-model reviews:
-
-1. Add the required API key as a secret in your repository settings
-2. Create a workflow file in `.github/workflows/` using one of the examples above
-3. Put your review focus in `.github/prompts/ai-review.md` (see [Review Prompt](#review-prompt))
-
 ## Versioning
 
-The examples use `@main` for brevity. Pin callers to the commit SHA of a [release tag](https://github.com/yetanotherco/actions/tags) instead:
+Pin callers to the commit SHA of a [release tag](https://github.com/yetanotherco/actions/tags):
 
 ```yaml
-uses: yetanotherco/actions/.github/workflows/pr_review_claude.yml@<tag commit SHA> # <tag>
+uses: yetanotherco/actions/.github/workflows/pr_review_multi.yml@<tag commit SHA> # <tag>
 ```
 
-## Triggering Reviews
-
-All workflows support two trigger methods:
-
-1. **Automatic on PR** - Runs when a PR is opened or marked ready for review
-2. **Manual via comment** - Comment on a PR to trigger a review:
-   - `/claude` - Claude PR Review (custom prompt)
-   - `/codex` - Codex PR Review
-   - `/kimi` - Kimi PR Review
-   - `/deepseek`, `/grok`, `/gemini` - OpenRouter PR Review, with the commands from the OpenRouter table
-   - In this repository, `/review` runs the [multi-model review](#multi-model-pr-review); callers choose their own command
-
-Only repository owners, members, and collaborators can trigger reviews via comments.
+The single-model reviews (`pr_review_claude.yml`, `pr_review_codex.yml`, `pr_review_kimi.yml`, `pr_review_openrouter.yml`) were removed after `v2.0.0`. Callers pinned to `v2.0.0` or earlier keep working; their docs are in the README at that tag.
 
 ## Security
 
 ### Fork PR Protection
 
-All workflows include built-in protection against fork PR secret exposure. When triggered via `issue_comment` on a fork PR, the workflow will block execution with an error to prevent secrets from being exposed to untrusted code.
-
-**Recommended:** Add fork protection in your consumer workflow's `if` condition for `pull_request` events:
-
-```yaml
-if: |
-  (github.event_name == 'pull_request' &&
-   github.event.pull_request.head.repo.full_name == github.repository) ||
-  ...
-```
-
-This provides defense-in-depth: consumer repos explicitly skip fork PRs, and the shared workflow enforces it as a fail-safe.
+The workflow refuses fork PRs on every trigger before any secret is used, and posts a comment saying so. The [caller example](#set-it-up-in-a-repository) also skips them in its `if` for `pull_request` events, for defense in depth: the caller skips fork PRs, and the shared workflow enforces it as a fail-safe.
