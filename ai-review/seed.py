@@ -1043,7 +1043,7 @@ def _make_targets(wt: Path, head: str, files: list[str]) -> tuple[set[str], list
 
 
 def housekeeping_scan(wt: Path, mb: str, head: str, recs: list[FileRec]) -> dict:
-    """Leads for the housekeeping lane, from the lines the PR adds (code, docs and config; not tests,
+    """Leads for the PR comment (listed apart, not given to the housekeeping model), from the lines the PR adds (code, docs and config; not tests,
     vendored, generated or ignored files): {"missing": [{"ref", "kind": "path"|"make", "at": [file:line]}],
     "unreferenced": [{"name", "at"}]}. Paths must look like files (known extension) or directories
     (trailing /); a path the head tree has, or a .gitignore covers, is not reported."""
@@ -1142,29 +1142,6 @@ def housekeeping_scan(wt: Path, mb: str, head: str, recs: list[FileRec]) -> dict
             "unreferenced_more": max(len(unreferenced) - HK_HINT_LIMIT, 0)}
 
 
-def housekeeping_hints_text(scan: dict) -> str:
-    """The scan as the <scripted_hints> block of the housekeeping prompt."""
-    if not scan or not (scan.get("missing") or scan.get("unreferenced")):
-        return "(none: the script found no missing path or make target and no unreferenced new name)"
-    out = ["Found by a script with no model, from the lines this PR adds. Leads, not findings: it can be wrong "
-           "(a path created at runtime, a name used through reflection). Confirm each one before you report it."]
-    if scan.get("missing"):
-        out.append("Referenced in the PR but not in the repository at the PR head:")
-        for x in scan["missing"]:
-            what = f"`make {x['ref']}`: no Makefile defines the target" if x["kind"] == "make" else f"`{x['ref']}`"
-            more = f" (+{x['count'] - len(x['at'])} more)" if x["count"] > len(x["at"]) else ""
-            out.append(f"- {what} (at {', '.join(x['at'])}{more})")
-        if scan.get("missing_more"):
-            out.append(f"- [... {scan['missing_more']} more]")
-    if scan.get("unreferenced"):
-        out.append("Defined by this PR and referenced nowhere else in the repository (unused leftover?):")
-        for x in scan["unreferenced"]:
-            out.append(f"- `{x['name']}` ({', '.join(x['at'])})")
-        if scan.get("unreferenced_more"):
-            out.append(f"- [... {scan['unreferenced_more']} more]")
-    return "\n".join(out)
-
-
 # --------------------------------------------------------------------------------------
 # summaries
 
@@ -1220,4 +1197,4 @@ def sizes(recs: list[FileRec]) -> dict:
 
 __all__ = ["FileRec", "Unit", "classify_files", "collect_tests", "tests_block", "seed_diff", "plain_diff",
            "docs_diff", "changed_symbols", "plan_units", "filtered_table", "not_reviewed", "sizes", "size_class",
-           "glob_match", "is_low_risk", "malicious_scan", "malicious_input", "housekeeping_scan", "housekeeping_hints_text", "ws_sensitive", "ATTRS", "MAX_EFFECTIVE", "TEST_WEIGHT", "DIFF_CAP"]
+           "glob_match", "is_low_risk", "malicious_scan", "malicious_input", "housekeeping_scan", "ws_sensitive", "ATTRS", "MAX_EFFECTIVE", "TEST_WEIGHT", "DIFF_CAP"]

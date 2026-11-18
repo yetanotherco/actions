@@ -3224,7 +3224,7 @@ def build_plan(args, meta: dict, wt: Path, mb: str, head: str, cfg: dict, scratc
     for u in units:
         u.effective = sum(by_path[p].effective for p in u.files)
     mal_diff, mal_hits = seedlib.malicious_input(wt, mb, head, recs, attrs)
-    try:   # leads for the housekeeping lane: missing paths and make targets, unreferenced new names
+    try:   # leads for the PR comment: missing paths and make targets, unreferenced new names
         hk_scan = seedlib.housekeeping_scan(wt, mb, head, recs)
     except Exception as e:  # noqa: BLE001 - a scan failure only means no hints
         log(f"housekeeping scan failed: {mask(str(e))[:200]}")
@@ -3239,7 +3239,7 @@ def build_plan(args, meta: dict, wt: Path, mb: str, head: str, cfg: dict, scratc
             "leftover_docs_diff": seedlib.docs_diff(wt, mb, head, leftover_docs, attrs) if leftover_docs else "",
             "leftover_docs": [r.path for r in leftover_docs],
             "triage_input": triage_in, "malicious": {"diff": mal_diff, "hits": mal_hits}, "paths": paths,
-            "housekeeping_scan": hk_scan, "housekeeping_hints": seedlib.housekeeping_hints_text(hk_scan),
+            "housekeeping_scan": hk_scan,
             "attrs": attrs, "not_reviewed": not_reviewed}
 
 
@@ -3553,8 +3553,30 @@ def pr_comment(ctx: dict) -> str:
             where = "`" + _cell(f"{it['file']}:{it['line']}", 200).replace("`", "'") + "`"
             out.append(f"| {_cell(it['kind'], 40)} | {_cell(it['title'], 120)} | {where} | {_cell(it['fix'], 300)} |")
         out += ["", "</details>", ""]
+    out += scan_lead_lines(ctx.get("housekeeping_scan") or {})
     out.append(cost_line(ctx))
     return "\n".join(out)
+
+
+def scan_lead_lines(scan: dict) -> list[str]:
+    """The housekeeping script's leads in the comment, apart from the model's items. Shown, not fed to the
+    housekeeping model: with them in its prompt it only checked leads and stopped searching on its own
+    (2026-11-17, propamm #1 and actions#24); alone, the script found 6 of propamm #1's 9 known stale
+    references, 2 that no model run found, plus a few false leads (paths created at runtime)."""
+    missing, unref = scan.get("missing") or [], scan.get("unreferenced") or []
+    if not (missing or unref):
+        return []
+    out = [f"<details><summary>Leads from a script (not checked): {len(missing) + len(unref)}</summary>", "",
+           "Found without a model, from the lines this PR adds. Some can be wrong, e.g. a path created at runtime "
+           "or a name used through reflection.", ""]
+    for x in missing:
+        what = (f"`make {_cell(x['ref'], 80)}`: no Makefile defines this target" if x.get("kind") == "make"
+                else f"`{_cell(x['ref'], 120)}` does not exist in the repository")
+        out.append(f"- {what} (referenced at {_cell(', '.join(x.get('at') or []), 200)})")
+    for x in unref:
+        out.append(f"- `{_cell(x['name'], 80)}` is added by this PR and referenced nowhere else "
+                   f"({_cell(', '.join(x['at']) if isinstance(x.get('at'), list) else str(x.get('at', '')), 120)})")
+    return out + ["", "</details>", ""]
 
 
 def cost_line(ctx: dict) -> str:
@@ -4511,15 +4533,19 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
             out_dir = udir / "housekeeping"
             write_text(udir / "prompt_housekeeping.txt", prompt)
             label = f"{u.uid}/housekeeping"
+            # like the finders: a big prompt costs more per turn (2026-11-17: on a 711k-char prompt it hit its
+            # $0.25 soft limit after ~38 of its 150 commands)
+            sc = prompt_scale(len(prompt))
+            hk_soft, hk_cap = {**HOUSEKEEPING_SOFT, "usd": HOUSEKEEPING_SOFT["usd"] * sc}, HOUSEKEEPING_CAP * sc
 
             def fn(lease: KeyLease) -> dict:
                 r = run_lane("housekeeping", "codex", HOUSEKEEPING_MODEL, prompt, schema_hk, wt, out_dir, lease.get(),
-                             hprices, HOUSEKEEPING_SOFT["time_s"] + 300, 0.0, routing, HOUSEKEEPING_CAP, label,
-                             iso != "keys", HOUSEKEEPING_SOFT, None, "high")
+                             hprices, HOUSEKEEPING_SOFT["time_s"] + 300, 0.0, routing, hk_cap, label,
+                             iso != "keys", hk_soft, None, "high")
                 r["lane"], r["mode"], r["unit"] = "housekeeping", "housekeeping", u.uid
                 parse_housekeeping(r, out_dir)
                 return r
-            return Job(label, f"{u.uid}/agentic", "housekeeping", HOUSEKEEPING_CAP, HOUSEKEEPING_SOFT["usd"] / 2, fn,
+            return Job(label, f"{u.uid}/agentic", "housekeeping", hk_cap, hk_soft["usd"] / 2, fn,
                        {"lane": "housekeeping", "model": HOUSEKEEPING_MODEL, "harness": "codex",
                         "mode": "housekeeping", "unit": u.uid}, out_dir / "result.json")
 
@@ -5050,6 +5076,7 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
            "worktree_dirty": dirty, "sizes": plan["sizes"], "paths": plan["paths"],
            "units": [u.__dict__ for u in units], "filtered": seedlib.filtered_table(plan["recs"]),
            "not_reviewed": plan["not_reviewed"], "malicious_hits": plan["malicious"]["hits"],
+           "housekeeping_scan": plan.get("housekeeping_scan") or {},
            "pinning": routing.table(sorted({r.get("model") for r in lane_rows if r.get("model")}
                                                              | {DOCS_MODEL})),
            "estimate_total": est_total, "isolation": iso, "isolation_note": iso_note, "phases": phases,

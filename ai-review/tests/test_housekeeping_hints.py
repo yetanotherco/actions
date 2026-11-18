@@ -108,20 +108,20 @@ class Scan(unittest.TestCase):
         scan = self.scan({"src/main.rs": rs})
         self.assertEqual([x["name"] for x in scan["unreferenced"]], ["unused_helper", "LIMIT"])
 
-    def test_hints_text(self):
-        self.assertTrue(seed.housekeeping_hints_text({}).startswith("(none"))
-        text = seed.housekeeping_hints_text({
+    def test_leads_in_the_comment(self):
+        self.assertEqual(rp.scan_lead_lines({}), [])
+        out = "\n".join(rp.scan_lead_lines({
             "missing": [{"ref": "e2e-custom", "kind": "make", "at": ["a.md:1"], "count": 1},
-                        {"ref": "deploy/x.md", "kind": "path", "at": ["b.md:2", "c.md:3", "d.md:4"], "count": 5}],
-            "missing_more": 0, "unreferenced": [{"name": "FOO", "at": ["x.py:3"]}], "unreferenced_more": 2})
-        self.assertIn("- `make e2e-custom`: no Makefile defines the target (at a.md:1)", text)
-        self.assertIn("- `deploy/x.md` (at b.md:2, c.md:3, d.md:4 (+2 more))", text)
-        self.assertIn("- `FOO` (x.py:3)", text)
-        self.assertIn("[... 2 more]", text)
+                        {"ref": "deploy/x.md", "kind": "path", "at": ["b.md:2", "c.md:3"], "count": 2}],
+            "unreferenced": [{"name": "FOO", "at": ["x.py:3"]}]}))
+        self.assertIn("Leads from a script (not checked): 3", out)
+        self.assertIn("- `make e2e-custom`: no Makefile defines this target (referenced at a.md:1)", out)
+        self.assertIn("- `deploy/x.md` does not exist in the repository (referenced at b.md:2, c.md:3)", out)
+        self.assertIn("- `FOO` is added by this PR and referenced nowhere else (x.py:3)", out)
 
 
 class Plan(unittest.TestCase):
-    def test_build_plan_carries_the_hints_into_the_prompt(self):
+    def test_build_plan_carries_the_scan_and_the_prompt_has_no_hints(self):
         repo = Repo()
         self.addCleanup(repo.close)
         mb = repo.commit(BASE)
@@ -129,12 +129,9 @@ class Plan(unittest.TestCase):
         args = types.SimpleNamespace(paths=None, lane_list=["claude", "gpt"], mode_list=["agentic"])
         plan = rp.build_plan(args, {"title": "t", "body": ""}, repo.path, mb, head, {}, repo.dir / "scratch",
                              repo.dir / "run")
-        self.assertIn("`docs/gone.md`", plan["housekeeping_hints"])
-        self.assertIn("`NEVER_READ`", plan["housekeeping_hints"])
-        template = (Path(rp.ROOT) / "prompts" / "housekeeping.md").read_text()
-        self.assertIn("{{HINTS}}", template)
-        filled = rp.fill(template, {"HINTS": plan["housekeeping_hints"]})
-        self.assertIn("<scripted_hints>\nFound by a script", filled)
+        self.assertEqual([x["ref"] for x in plan["housekeeping_scan"]["missing"]], ["docs/gone.md"])
+        self.assertEqual([x["name"] for x in plan["housekeeping_scan"]["unreferenced"]], ["NEVER_READ"])
+        self.assertNotIn("{{HINTS}}", (Path(rp.ROOT) / "prompts" / "housekeeping.md").read_text())
 
 
 if __name__ == "__main__":
