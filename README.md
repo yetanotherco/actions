@@ -225,7 +225,19 @@ The diff comes from git, so PRs over the pulls API's 20000-line diff limit still
 
 1. **Secrets.** Make `OPENROUTER_API_KEY` and `ANTHROPIC_API_KEY` available to the repository, preferably as organization secrets so that each repository needs nothing. The secrets table below says what limits to put on them.
 2. **One workflow file.** Copy the example below to `.github/workflows/ai-review.yml` and pin it to a commit (see [Versioning](#versioning)). `v2.0.0` and earlier tags don't have this workflow.
-3. **Nothing else is required.** Without a config the built-in rules apply: code gets all five reviewers and the default prompt; lockfiles, generated and vendored code, binaries, docs and whitespace-only changes are not reviewed; tests are listed, not diffed. Add `.github/ai-review/config.toml` or `threat_model.md` only to change that (see [Repository config](#repository-config)).
+3. **Nothing else is required.** Without a config the built-in rules decide who reads each changed file, with the default prompt. Add `.github/ai-review/config.toml` or `threat_model.md` only to change that (see [Repository config](#repository-config)).
+
+   | Changed file | Security reviewers | Malicious-code check | Housekeeping |
+   |---|---|---|---|
+   | Code | the diff | the diff | the diff |
+   | Tests | the list of test files and the test functions changed; they open them as needed | the diff | opens them to look for missing tests |
+   | Build and install scripts, dependency manifests, git hooks, CI workflows, editor tasks | the diff (they are code) | the diff | the diff |
+   | Docs (`.md`, `.txt`, ...) | no, unless `always_review` | no | the diff |
+   | Lockfiles | no | only lines the pattern scan matches (dependency sources, install scripts, ...) | no |
+   | Generated or vendored code, whitespace-only changes, `ignore` globs | no | the diff | no |
+   | Binary files | no | no | no |
+
+   The malicious-code check runs when the PR changes a test or a file from the third row, or when the pattern scan matches a line in any file but docs; otherwise the security reviewers already have everything it would read. Binary files are listed at the top of the comment.
 4. **Try it.** Add the `ai-review` label to a PR; the label works from the PR that adds the workflow file. `/review` comments work only once the file is on the default branch, because GitHub runs comment triggers from there. The comment arrives in 15–35 minutes.
 
 ```yaml
@@ -305,8 +317,8 @@ Both files are optional: a `config.toml` and a `threat_model.md` in `.github/ai-
 Each changed file is handled by the first rule that matches:
 
 1. `always_review` globs: reviewed as code, whatever the rules below say (binary files and whitespace-only changes excepted). For text that drives behaviour, such as model prompts.
-2. `ignore` globs: not reviewed.
-3. Built in, not reviewed: lockfiles, binary files, generated and vendored code (`vendor/`, `node_modules/`, `dist/`, `*.min.js`, `*.pb.go`, ...), whitespace-only changes (except in Python, shell, YAML and Makefiles), and docs (`.md`, `.txt`, `LICENSE`, ...).
+2. `ignore` globs: not sent to the security reviewers.
+3. Built in, not sent to the security reviewers: lockfiles, binary files, generated and vendored code (`vendor/`, `node_modules/`, `dist/`, `*.min.js`, `*.pb.go`, ...), whitespace-only changes (except in Python, shell, YAML and Makefiles), and docs (`.md`, `.txt`, `LICENSE`, ...). The table in [Set it up in a repository](#set-it-up-in-a-repository) shows what the malicious-code check and housekeeping read instead.
 4. Tests (built-in patterns such as `tests/`, `*_test.rs`, `*.test.ts`, plus `test_globs`): reviewers get the test files and the test functions they add, change or remove, not their diff.
 5. Everything else is code and gets all five reviewers.
 
