@@ -239,6 +239,17 @@ class MaliciousScan(RepoCase):
         line = next(x for x in hits if x["kind"] == "credential files")
         self.assertEqual(line["line"], 2)
 
+    def test_lockfile_hits_survive_many_earlier_hits_and_non_ascii_paths(self):
+        noisy = "".join(f"const u{i} = 'https://h{i}.example.com'\n" for i in range(400))
+        base = {"a/tests/n.test.ts": "x\n", "café/package-lock.json": "{}\n"}
+        head = {"a/tests/n.test.ts": noisy,
+                "café/package-lock.json": '{"resolved": "https://evil.invalid/x.tgz"}\n'}
+        mb, h = self.pr(base, head)
+        recs = seed.classify_files(self.repo.path, mb, h, {}, None)
+        hits = seed.malicious_scan(self.repo.path, mb, h, recs)
+        self.assertEqual(len(hits), 300)
+        self.assertEqual((hits[0]["file"], hits[0]["kind"]), ("café/package-lock.json", "dependency source"))
+
     def test_nothing_to_check_when_only_product_code_changed(self):
         mb, h = self.pr({"src/a.rs": "fn a() {}\n"}, {"src/a.rs": "fn a() { 1 }\n"})
         recs = seed.classify_files(self.repo.path, mb, h, {}, None)

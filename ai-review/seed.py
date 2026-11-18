@@ -821,14 +821,18 @@ def is_dev_exec(path: str) -> bool:
 
 
 def malicious_scan(wt: Path, mb: str, head: str, recs: list[FileRec], limit: int = 300) -> list[dict]:
-    """Added lines that match MAL_PATTERNS, in every changed text file but docs (lockfiles included)."""
+    """Added lines that match MAL_PATTERNS, in every changed text file but docs (lockfiles included).
+    Dependency-source hits and every hit in a lockfile come first and are never cut by `limit`: the
+    lockfiles reach the malicious-code check only through them."""
     kinds = {r.path: r.kind for r in recs}
+    locks = {r.path for r in recs if r.reason == "lockfile"}
     paths = [r.path for r in recs if r.kind != "docs" and not r.binary and r.reason != "outside --paths"]
     if not paths:
         return []
     keep = set(paths)
-    diff = git(wt, "diff", "--no-color", "--no-ext-diff", "-U0", "-M", mb, head, "--", *_pathspecs(
-        [r for r in recs if r.path in keep and not _ODD_NAME.search(r.path)]))
+    # core.quotePath=false: a non-ASCII path is printed as is (`+++ b/café/x`), not C-quoted (`+++ "b/caf\303\251/x"`)
+    diff = git(wt, "-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "-U0", "-M", mb, head, "--",
+               *_pathspecs([r for r in recs if r.path in keep and not _ODD_NAME.search(r.path)]))
     hits, path, line = [], None, 0
     for ln in diff.splitlines():
         if ln.startswith("+++ "):
@@ -845,13 +849,12 @@ def malicious_scan(wt: Path, mb: str, head: str, recs: list[FileRec], limit: int
             if (where == "all" or dev) and rx.search(ln[1:]):
                 hits.append({"file": path, "line": line, "kind": name, "text": ln[1:].strip()[:200]})
         line += 1
-        if len(hits) >= limit:
-            break
     for r in recs:   # files that run by themselves just by being there
         if glob_match(r.path, ["**/.vscode/tasks.json", "**/.husky/**", "**/.githooks/**", "**/.devcontainer/**",
                                "**/lefthook.y*ml", "**/.pre-commit-config.yaml", "**/.envrc"]) and r.status != "D":
             hits.append({"file": r.path, "line": 0, "kind": "runs by itself", "text": "file changed: " + r.path})
-    return hits[:limit]
+    keep_all = [h for h in hits if h["kind"] == "dependency source" or h["file"] in locks]
+    return keep_all + [h for h in hits if h not in keep_all][:max(0, limit - len(keep_all))]
 
 
 def malicious_input(wt: Path, mb: str, head: str, recs: list[FileRec], attrs: Path) -> tuple[str, list[dict]]:

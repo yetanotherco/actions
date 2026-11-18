@@ -2187,6 +2187,7 @@ def deterministic_groups(findings: list[dict]) -> list[list[int]]:
 def malicious_hits_text(hits: list[dict], limit: int = 150) -> str:
     if not hits:
         return "(no matches)"
+    limit = max(limit, sum(h["kind"] == "dependency source" for h in hits))   # those come first, never cut
     lines = [f"{h['file']}:{h['line']} [{h['kind']}] {h['text']}" for h in hits[:limit]]
     return "\n".join(lines) + (f"\n[... {len(hits) - limit} more]" if len(hits) > limit else "")
 
