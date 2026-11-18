@@ -109,5 +109,22 @@ class CredentialDenies(unittest.TestCase):
             self.assertIn(p, claude)
 
 
+
+class PresetOutputLimit(unittest.TestCase):
+    def test_limit_is_32k_or_the_model_maximum(self):
+        self.assertEqual(rp.preset_max_tokens(None), 32_000)
+        self.assertEqual(rp.preset_max_tokens({"top_provider": {"max_completion_tokens": 16_384}}), 16_384)
+        self.assertEqual(rp.preset_max_tokens({"top_provider": {"max_completion_tokens": None}}), 32_000)
+
+    def test_a_preset_without_a_limit_is_flagged(self):
+        r = rp.Routing.__new__(rp.Routing)
+        r.pin_mode, r.presets = "auto", {"m/x": {"slug": "air-m-x", "stored_config": {"model": "m/x"}}}
+        with mock.patch.object(rp.Routing, "provider", lambda self, m: {"order": ["a"]}):
+            sent, note = r.harness_model("m/x")
+            self.assertEqual(sent, "m/x@preset/air-m-x")
+            self.assertIn("no output limit", note)
+            r.presets["m/x"]["stored_config"]["max_tokens"] = 32_000
+            self.assertEqual(r.harness_model("m/x")[1], "pinned via preset air-m-x")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

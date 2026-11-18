@@ -754,6 +754,9 @@ class Routing:
         carries the provider pin, since neither harness can add `provider` to the body."""
         if self.pin_mode in ("auto", "presets") and model in self.presets and self.provider(model):
             slug = self.presets[model]["slug"]
+            if '"max_tokens"' not in json.dumps(self.presets[model].get("stored_config") or {}):
+                return (f"{model}@preset/{slug}", f"pinned via preset {slug} (no output limit: the provider's "
+                        "default applies; re-run --setup-presets --yes)")
             return f"{model}@preset/{slug}", f"pinned via preset {slug}"
         if self.pin_mode == "presets":
             raise RuntimeError(f"--pin presets but no usable preset for {model}; run --setup-presets")
@@ -3362,6 +3365,18 @@ def preset_slug(model: str) -> str:
     return "air-" + re.sub(r"[^a-z0-9]+", "-", model.lower()).strip("-")
 
 
+# Codex sends no output limit (its Responses request has no max_output_tokens; checked 2026-11-18 against a local
+# stub), so a provider's own default applies: DeepSeek V4 Pro stopped at exactly 8,000 tokens mid-reasoning in CI
+# run 44227584384 and answered nothing. The preset carries an explicit limit instead, which OpenRouter sends with
+# every request and routes only to providers that accept.
+PRESET_MAX_TOKENS = 32_000
+
+
+def preset_max_tokens(catalog_entry: dict | None) -> int:
+    top = ((catalog_entry or {}).get("top_provider") or {}).get("max_completion_tokens")
+    return min(PRESET_MAX_TOKENS, int(top)) if top else PRESET_MAX_TOKENS
+
+
 def setup_presets(models: list[str], yes: bool) -> None:
     """Create/update one OpenRouter preset per model carrying {model, provider pin}. These POSTs
     store configuration (no inference); they change the account, so they need --yes."""
@@ -3373,7 +3388,8 @@ def setup_presets(models: list[str], yes: bool) -> None:
         p = routing.provider(m)
         plan.append((m, preset_slug(m), p, routing.pin_note(m)))
     for m, slug, p, note in plan:
-        print(f"  {m:36s} preset {slug:40s} {json.dumps(p) if p else '(skipped: ' + note + ')'}")
+        print(f"  {m:36s} preset {slug:40s} {json.dumps(p) if p else '(skipped: ' + note + ')'}"
+              f" max_tokens {preset_max_tokens(routing.catalog.get(m))}")
     if not yes:
         print("\nNot created. Re-run with --setup-presets --yes to POST these to "
               f"{OR_API}/presets/<slug>/chat/completions (stores config; no inference).")
@@ -3385,7 +3401,8 @@ def setup_presets(models: list[str], yes: bool) -> None:
     for m, slug, p, _ in plan:
         if not p:
             continue
-        body = {"model": m, "provider": p, "messages": [{"role": "user", "content": "preset capture"}]}
+        mt = preset_max_tokens(routing.catalog.get(m))
+        body = {"model": m, "provider": p, "max_tokens": mt, "messages": [{"role": "user", "content": "preset capture"}]}
         try:
             d = http_json(f"{OR_API}/presets/{slug}/chat/completions", key, body, timeout=60).get("data") or {}
             ver = (d.get("designated_version") or {})
@@ -3393,6 +3410,9 @@ def setup_presets(models: list[str], yes: bool) -> None:
                                   "version": ver.get("version"), "stored_config": ver.get("config"),
                                   "updated": dt.datetime.now().isoformat(timespec="seconds")}
             log(f"preset {slug}: version {ver.get('version')} config {json.dumps(ver.get('config'))}")
+            if f'"max_tokens": {mt}' not in json.dumps(ver.get("config") or {}):
+                log(f"WARNING preset {slug}: the stored config has no max_tokens {mt}; the provider's default "
+                    "output limit still applies")
         except Exception as e:  # noqa: BLE001
             log(f"preset {slug} failed: {e}")
     write_json(PRESETS_FILE, saved)
