@@ -202,9 +202,10 @@ JUDGE_TIMEOUT_S = 30 * 60   # hard stop of the batched judge (one session over a
 
 
 def judge_soft(n: int) -> dict:
-    """Soft budget of the batched judge over n findings: ~4 commands per finding (single-finding
-    checks used 2-8), at least 15. A guess until measured."""
-    return {"tools": min(100, 15 + 4 * n), "usd": min(3.00, 0.50 + 0.10 * n), "time_s": min(1500, 300 + 60 * n)}
+    """Soft budget of the judge's one session over n findings. Measured (2026-11-17, GPT judge, 15 sessions of
+    3-14 findings): 9-22 commands, 2-5 minutes, ~1-2 commands per finding, most judged from the diff in the
+    prompt. 2 per finding plus 15, up to 150 commands; 20 s per finding plus 5 minutes, up to 25."""
+    return {"tools": min(150, 15 + 2 * n), "usd": min(3.00, 0.50 + 0.05 * n), "time_s": min(1500, 300 + 20 * n)}
 # A random code per run in every budget message, stated in the prompt: a PR that contains the text
 # "BUDGET EXHAUSTED" cannot fake a stop, because it cannot know the code (Fable review, 2026-11-12).
 BUDGET_CODE = secrets.token_hex(3).upper()
@@ -4027,8 +4028,8 @@ def main() -> None:
     ap.add_argument("--verify-min", choices=SEVERITIES, default="low",
                     help="verify merged findings of this severity and above (default low: all; docs never). "
                          "With --verify-each, medium/low go to GPT unless GPT reported them")
-    ap.add_argument("--max-verify", type=int, default=20,
-                    help="most findings verified per run, most severe first (default 20)")
+    ap.add_argument("--max-verify", type=int, default=60,
+                    help="most findings verified per run, most severe first (default 60)")
     ap.add_argument("--claude-auth", choices=["openrouter", "subscription", "anthropic"], default="openrouter",
                     help="Claude Code lanes (claude, fable) on OpenRouter, on the Anthropic API (anthropic: "
                          "ANTHROPIC_API_KEY from the environment; what CI uses), or on your Claude subscription "
