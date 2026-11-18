@@ -226,7 +226,7 @@ The diff comes from git, so PRs over the pulls API's 20000-line diff limit still
 1. **Secrets.** Make `OPENROUTER_API_KEY` and `ANTHROPIC_API_KEY` available to the repository, preferably as organization secrets so that each repository needs nothing. The secrets table below says what limits to put on them.
 2. **One workflow file.** Copy the example below to `.github/workflows/ai-review.yml` and pin it to a commit (see [Versioning](#versioning)). `v2.0.0` and earlier tags don't have this workflow.
 3. **Nothing else is required.** Without a config the built-in rules apply: code gets all five reviewers and the default prompt; lockfiles, generated and vendored code, binaries, docs and whitespace-only changes are not reviewed; tests are listed, not diffed. Add `.github/ai-review/config.toml` or `threat_model.md` only to change that (see [Repository config](#repository-config)).
-4. **Try it.** Add the `ai-review` label to a PR, or comment `/review` on it. The comment arrives in 15–35 minutes.
+4. **Try it.** Add the `ai-review` label to a PR; the label works from the PR that adds the workflow file. `/review` comments work only once the file is on the default branch, because GitHub runs comment triggers from there. The comment arrives in 15–35 minutes.
 
 ```yaml
 name: AI Review
