@@ -50,7 +50,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
-          [ "$(gh pr view "$PR_NUMBER" --json isCrossRepository --jq .isCrossRepository)" = false ] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
+          cross=$(gh pr view "$PR_NUMBER" --json isCrossRepository --jq .isCrossRepository) || { echo "::error::Could not look up PR #$PR_NUMBER to check whether it comes from a fork"; exit 1; }
+          [ "$cross" = false ] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
 
       - name: Load prompt
         id: prompt

@@ -2,8 +2,10 @@ name: AI Code Review (single model)
 
 # One model's review of this repository's PR, on demand: comment `/claude`,
 # `/codex`, `/kimi`, `/deepseek`, `/grok` or `/gemini`. Comment triggers run
-# the copies of the reusable workflows on the default branch. Kept apart from
-# ai-review.yml so that its label events don't list these jobs as skipped.
+# the copies of the reusable workflows on the default branch. The command must be
+# alone or followed by a space or a new line, so `/claudefoo` doesn't start one.
+# Kept apart from ai-review.yml so that its label events don't list these
+# jobs as skipped.
 
 on:
   issue_comment:
@@ -16,13 +18,12 @@ jobs:
     if: >
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/claude'))
+      (github.event.comment.body == '/claude' || startsWith(github.event.comment.body, '/claude ') || startsWith(github.event.comment.body, fromJSON('"/claude\n"')) || startsWith(github.event.comment.body, fromJSON('"/claude\r"')))
     uses: ./.github/workflows/pr_review_claude.yml
     permissions:
       contents: read
       pull-requests: write
       issues: read
-      id-token: write
     with:
       custom_prompt: &review_prompt |
         This repository holds reusable GitHub Actions workflows that other repositories call to get AI reviews of their pull requests (`.github/workflows/pr_review_*.yml`), plus the README that documents how to call them. The single-model workflows run one model (Claude through claude-code-action, Codex through codex-action, Kimi through the Moonshot API, and DeepSeek, Grok and Gemini through the OpenRouter API) on a PR diff and post the result as a PR comment. `pr_review_multi.yml` runs several models as agents in a read-only sandbox through the Python runner in `ai-review/` (`run_pilot.py`, `seed.py`, its prompts and tests), has a judge check their findings, and posts one comment; it handles API keys, sandboxing and spend limits, so treat those as security-relevant.
@@ -52,7 +53,7 @@ jobs:
     if: >
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/codex'))
+      (github.event.comment.body == '/codex' || startsWith(github.event.comment.body, '/codex ') || startsWith(github.event.comment.body, fromJSON('"/codex\n"')) || startsWith(github.event.comment.body, fromJSON('"/codex\r"')))
     uses: ./.github/workflows/pr_review_codex.yml
     permissions:
       contents: read
@@ -67,7 +68,7 @@ jobs:
     if: >
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/kimi'))
+      (github.event.comment.body == '/kimi' || startsWith(github.event.comment.body, '/kimi ') || startsWith(github.event.comment.body, fromJSON('"/kimi\n"')) || startsWith(github.event.comment.body, fromJSON('"/kimi\r"')))
     uses: ./.github/workflows/pr_review_kimi.yml
     permissions:
       contents: read
@@ -81,7 +82,7 @@ jobs:
     if: >
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/deepseek'))
+      (github.event.comment.body == '/deepseek' || startsWith(github.event.comment.body, '/deepseek ') || startsWith(github.event.comment.body, fromJSON('"/deepseek\n"')) || startsWith(github.event.comment.body, fromJSON('"/deepseek\r"')))
     uses: ./.github/workflows/pr_review_openrouter.yml
     permissions:
       contents: read
@@ -98,7 +99,7 @@ jobs:
     if: >
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/grok'))
+      (github.event.comment.body == '/grok' || startsWith(github.event.comment.body, '/grok ') || startsWith(github.event.comment.body, fromJSON('"/grok\n"')) || startsWith(github.event.comment.body, fromJSON('"/grok\r"')))
     uses: ./.github/workflows/pr_review_openrouter.yml
     permissions:
       contents: read
@@ -113,7 +114,7 @@ jobs:
     if: >
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-      (startsWith(github.event.comment.body, '/gemini'))
+      (github.event.comment.body == '/gemini' || startsWith(github.event.comment.body, '/gemini ') || startsWith(github.event.comment.body, fromJSON('"/gemini\n"')) || startsWith(github.event.comment.body, fromJSON('"/gemini\r"')))
     uses: ./.github/workflows/pr_review_openrouter.yml
     permissions:
       contents: read
