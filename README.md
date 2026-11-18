@@ -217,7 +217,7 @@ The diff comes from git, so PRs over the pulls API's 20000-line diff limit still
 
 1. **Reviewers.** Opus 5.5 (effort xhigh), GPT 6.1 Sol, Kimi K3.1, GLM 5.3 and DeepSeek V4 Pro review the PR in parallel. Each is an agent (Claude Code or Codex) in a read-only sandbox with no network, so it reads callers, checks and types outside the diff. A soft budget asks each reviewer to finish: after 80 commands (120 for GPT and GLM), about $1.50–2.50 of estimated spend, or 30 minutes, whichever comes first; the dollar limits grow with the size of the prompt. A PR made only of `low_risk` code gets three reviewers instead of five (see below).
 2. **Housekeeping.** A cheap model (DeepSeek V4 Flash) lists stale docs, missing tests, leftovers and inconsistencies, separately from the security review.
-3. **Malicious-code check.** One cheap call (DeepSeek V4 Flash) looks for code aimed at whoever builds, tests or opens the repository: it reads the tests, build and install scripts, git hooks, editor tasks and dependency sources the security reviewers don't see, plus every line a pattern scan matched anywhere in the PR (hidden Unicode, `curl | sh`, credential paths, secret environment variables, dependencies from git URLs or tarballs). Anything it reports goes at the top of the comment. On 10 planted attacks and 6 look-alike clean changes it caught all 10 and flagged none of the 6; on 10 real merged PRs it raised one item (a dependency from a personal fork). It costs well under a cent per PR.
+3. **Malicious-code check.** One cheap call (DeepSeek V4 Flash) looks for code aimed at whoever builds, tests or opens the repository: tests, build and install scripts, git hooks, CI workflows, editor tasks and dependency sources, plus every line a pattern scan matched in any changed file but docs (hidden Unicode, `curl | sh`, credential paths, secret environment variables, dependencies from git URLs or tarballs). Anything it reports goes at the top of the comment. On 10 planted attacks and 6 look-alike clean changes it caught all 10 and flagged none of the 6; on 10 real merged PRs it raised one item (a dependency from a personal fork). It costs well under a cent per PR.
 4. **Merge and judge.** Duplicate findings are merged. A judge (GPT 6.1 Sol) checks the findings against the code, sees every reviewer's claim, and marks each one a bug, suspected, pre-existing, or likely not a problem. The comment says how many it checked; findings it did not reach (more than 60, or over the budget) are marked *unverified*.
 5. **Comment.** It opens with a table of findings to check (severity, status, which models found it, where). Below that come collapsed sections: details, duplicates, pre-existing bugs, findings the judge dismissed (with its reason), and housekeeping. A last line gives what the review cost.
 
@@ -225,19 +225,7 @@ The diff comes from git, so PRs over the pulls API's 20000-line diff limit still
 
 1. **Secrets.** Make `OPENROUTER_API_KEY` and `ANTHROPIC_API_KEY` available to the repository, preferably as organization secrets so that each repository needs nothing. The secrets table below says what limits to put on them.
 2. **One workflow file.** Copy the example below to `.github/workflows/ai-review.yml` and pin it to a commit (see [Versioning](#versioning)). `v2.0.0` and earlier tags don't have this workflow.
-3. **Nothing else is required.** Without a config the built-in rules decide who reads each changed file, with the default prompt. Add `.github/ai-review/config.toml` or `threat_model.md` only to change that (see [Repository config](#repository-config)).
-
-   | Changed file | Security reviewers | Malicious-code check | Housekeeping |
-   |---|---|---|---|
-   | Code | the diff | the diff | the diff |
-   | Tests | the list of test files and the test functions changed; they open them as needed | the diff | opens them to look for missing tests |
-   | Build and install scripts, dependency manifests, git hooks, CI workflows, editor tasks | the diff (they are code) | the diff | the diff |
-   | Docs (`.md`, `.txt`, ...) | no, unless `always_review` | no | the diff |
-   | Lockfiles | no | only lines the pattern scan matches (dependency sources, install scripts, ...) | no |
-   | Generated or vendored code, whitespace-only changes, `ignore` globs | no | the diff | no |
-   | Binary files | no | no | no |
-
-   The malicious-code check runs when the PR changes a test or a file from the third row, or when the pattern scan matches a line in any file but docs; otherwise the security reviewers already have everything it would read. Binary files are listed at the top of the comment.
+3. **Nothing else is required.** Without a config, built-in rules decide which changed files each part of the review reads, with the default prompt. Add `.github/ai-review/config.toml` or `threat_model.md` only to change that (see [Repository config](#repository-config)).
 4. **Try it.** Add the `ai-review` label to a PR; the label works from the PR that adds the workflow file. `/review` comments work only once the file is on the default branch, because GitHub runs comment triggers from there. The comment arrives in 15–35 minutes.
 
 ```yaml
@@ -318,9 +306,16 @@ Each changed file is handled by the first rule that matches:
 
 1. `always_review` globs: reviewed as code, whatever the rules below say (binary files and whitespace-only changes excepted). For text that drives behaviour, such as model prompts.
 2. `ignore` globs: not sent to the security reviewers.
-3. Built in, not sent to the security reviewers: lockfiles, binary files, generated and vendored code (`vendor/`, `node_modules/`, `dist/`, `*.min.js`, `*.pb.go`, ...), whitespace-only changes (except in Python, shell, YAML and Makefiles), and docs (`.md`, `.txt`, `LICENSE`, ...). The table in [Set it up in a repository](#set-it-up-in-a-repository) shows what the malicious-code check and housekeeping read instead.
-4. Tests (built-in patterns such as `tests/`, `*_test.rs`, `*.test.ts`, plus `test_globs`): reviewers get the test files and the test functions they add, change or remove, not their diff.
-5. Everything else is code and gets all five reviewers.
+3. Built in, not sent to the security reviewers: lockfiles, binary files, generated and vendored code (`vendor/`, `node_modules/`, `dist/`, `*.min.js`, `*.pb.go`, ...), whitespace-only changes (except in Python, shell, YAML and Makefiles), and docs (`.md`, `.txt`, `LICENSE`, ...).
+4. Tests (built-in patterns such as `tests/`, `*_test.rs`, `*.test.ts`, plus `test_globs`): reviewers get the list of test files and the test functions they add, change or remove, not their diff, and open them as needed.
+5. Everything else is code, including build and install scripts, dependency manifests, git hooks, CI workflows and editor tasks, and gets all five reviewers.
+
+These rules decide what goes into the security reviewers' prompt as *the diff*: the PR's changes to each file. They work in a checkout of the PR and can open any other file. The other two parts read differently:
+
+- **Housekeeping** reads the diff of code and docs. It opens the tests to look for missing ones.
+- **Malicious-code check** reads the diff of every changed file except docs, lockfiles and binary files, so it also reads the tests, generated and vendored code, whitespace-only changes and `ignore` globs. From lockfiles it gets only the lines the pattern scan matches (dependency sources, install scripts, ...). It runs only when the PR changes a test, a build or install script, a dependency manifest, a git hook, a CI workflow or an editor task, or when the pattern scan matches a line in any file but docs. Otherwise the security reviewers already have everything it would read.
+
+No part reads binary files; they are listed at the top of the comment.
 
 A PR made only of `low_risk` code gets `low_risk_lanes` instead, unless a cheap triage call finds that it touches keys, auth, funds, cryptography or untrusted input.
 
@@ -348,7 +343,7 @@ Most repositories don't need a `threat_model.md`. Add one only when a reviewer c
 #### Cost and large PRs
 
 - **Typical cost:** about $3.40 for a normal PR at API prices, about half of it Opus; about $7–12 near the size limit. The comment's last line shows the cost of each review. In CI this figure is computed from token counts and published prices. The OpenRouter bill is exact, but a key shared by several repositories can't attribute it to one review.
-- **Size limit:** one review covers the whole PR, up to 20,000 *effective* lines: changed code (whitespace-only changes ignored, except in Python, shell, YAML and Makefiles; long deletions compacted) plus half the test lines; docs, lockfiles and generated files do not count. A bigger PR is not reviewed: the comment gives its effective size and asks for it to be split. The reviewers' prompt holds about 600,000 characters of diff (about 15,000 lines of whole functions); above that the largest changes come first and the rest is listed for them to read in the checkout. Changed files that no reviewer saw (binary to git, whitespace-only changes, unusual file names) are listed at the top of the comment.
+- **Size limit:** one review covers the whole PR, up to 20,000 *effective* lines: changed code (whitespace-only changes ignored, except in Python, shell, YAML and Makefiles; long deletions compacted) plus half the test lines; docs, lockfiles and generated files do not count. A bigger PR is not reviewed: the comment gives its effective size and asks for it to be split. The reviewers' prompt holds about 600,000 characters of diff (about 15,000 lines of whole functions); above that the largest changes come first and the rest is listed for them to read in the checkout. Changed files that no security reviewer saw (binary to git, whitespace-only changes, unusual file names) are listed at the top of the comment.
 - **Budget:** $30 per review by default (`pr_budget`; `budget=N` in a comment raises it). If a review stops at its budget or time limit, the comment says so and `/review continue` finishes it, reusing the reviewers that finished.
 - **Hard limits:** each reviewer is killed at its lane cap ($3–4 estimated). A watchdog stops the whole review at the PR budget, counting this review's own computed spend (other reviews may share the key). The ceilings the providers enforce are the OpenRouter key's credit limit, for every model but Opus, and the Anthropic workspace's spend limit, for Opus.
 - **Time:** a review takes 15–35 minutes, up to about an hour for a PR near the size limit. The judge is skipped (findings marked unverified) if the reviewers end more than 285 minutes after the start, so the comment is posted inside the job's 330-minute limit.
