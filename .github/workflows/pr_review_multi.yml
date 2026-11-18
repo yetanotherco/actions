@@ -187,7 +187,7 @@ jobs:
           if ! gh api "repos/$GH_REPO/contents/$CONFIG_DIR?ref=$BASE_SHA" \
                --jq '.[] | select(.type == "file") | .name' > "$RUNNER_TEMP/config_files.txt" 2> "$RUNNER_TEMP/config_error.txt"; then
             grep -q 'HTTP 404' "$RUNNER_TEMP/config_error.txt" || { cat "$RUNNER_TEMP/config_error.txt"; exit 1; }
-            echo "::notice::No $CONFIG_DIR on the base branch: every file gets the full review"
+            echo "::notice::No $CONFIG_DIR on the base branch: reviewing with the built-in rules and the default prompt"
             exit 0
           fi
           while read -r f; do

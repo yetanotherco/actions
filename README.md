@@ -225,7 +225,7 @@ The diff comes from git, so PRs over the pulls API's 20000-line diff limit still
 
 1. **Secrets.** Make `OPENROUTER_API_KEY` and `ANTHROPIC_API_KEY` available to the repository, preferably as organization secrets so that each repository needs nothing. The secrets table below says what limits to put on them.
 2. **One workflow file.** Copy the example below to `.github/workflows/ai-review.yml` and pin it to a commit (see [Versioning](#versioning)). `v2.0.0` and earlier tags don't have this workflow.
-3. **Nothing else is required.** Without a config, every changed file gets the full review with the default prompt. Add `.github/ai-review/config.toml` or `threat_model.md` only to change that (see [Repository config](#repository-config)).
+3. **Nothing else is required.** Without a config the built-in rules apply: code gets all five reviewers and the default prompt; lockfiles, generated and vendored code, binaries, docs and whitespace-only changes are not reviewed; tests are listed, not diffed. Add `.github/ai-review/config.toml` or `threat_model.md` only to change that (see [Repository config](#repository-config)).
 4. **Try it.** Add the `ai-review` label to a PR, or comment `/review` on it. The comment arrives in 15–35 minutes.
 
 ```yaml
@@ -300,7 +300,7 @@ The calling job must grant `contents: read`, `pull-requests: write` and `actions
 
 #### Repository config
 
-Both files are optional: a `config.toml` and a `threat_model.md` in `.github/ai-review/` in your repository. They are read from the PR's base branch, so a PR's own changes to them do not apply to its review. (Callers that also trigger on `pull_request` events run the PR's version of their own workflow file, which can change the inputs.) `threat_model` must be the name of a `.md` file in the same directory: the workflow fetches only `*.toml` and `*.md` files. Without a config every file gets the full review.
+Both files are optional: a `config.toml` and a `threat_model.md` in `.github/ai-review/` in your repository. They are read from the PR's base branch, so a PR's own changes to them do not apply to its review. (Callers that also trigger on `pull_request` events run the PR's version of their own workflow file, which can change the inputs.) `threat_model` must be the name of a `.md` file in the same directory: the workflow fetches only `*.toml` and `*.md` files. Without a config only the built-in rules below apply.
 
 Each changed file is handled by the first rule that matches:
 
