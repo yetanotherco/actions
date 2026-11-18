@@ -218,24 +218,43 @@ The diff comes from git, so PRs over the pulls API's 20000-line diff limit still
 1. **Reviewers.** Opus 5.5 (effort xhigh), GPT 6.1 Sol, Kimi K3.1, GLM 5.3 and DeepSeek V4 Pro review the PR in parallel. Each is an agent (Claude Code or Codex) in a read-only sandbox with no network, so it reads callers, checks and types outside the diff. A soft budget asks each reviewer to finish: after 80 commands (120 for GPT and GLM), about $1.50–2.50 of estimated spend, or 30 minutes, whichever comes first; the dollar limits grow with the size of the prompt. A PR made only of `low_risk` code gets three reviewers instead of five (see below).
 2. **Housekeeping.** A cheap model (DeepSeek V4 Flash) lists stale docs, missing tests, leftovers and inconsistencies, separately from the security review.
 3. **Malicious-code check.** One cheap call (DeepSeek V4 Flash) looks for code aimed at whoever builds, tests or opens the repository: it reads the tests, build and install scripts, git hooks, editor tasks and dependency sources the security reviewers don't see, plus every line a pattern scan matched anywhere in the PR (hidden Unicode, `curl | sh`, credential paths, secret environment variables, dependencies from git URLs or tarballs). Anything it reports goes at the top of the comment. On 10 planted attacks and 6 look-alike clean changes it caught all 10 and flagged none of the 6; on 10 real merged PRs it raised one item (a dependency from a personal fork). It costs well under a cent per PR.
-4. **Merge and judge.** Duplicate findings are merged. A judge (GPT 6.1 Sol) checks the findings against the code, sees every reviewer's claim, and marks each one a bug, suspected, pre-existing, or likely not a problem. The comment says how many it checked; findings it did not reach (more than 20, or over the budget) are marked *unverified*.
+4. **Merge and judge.** Duplicate findings are merged. A judge (GPT 6.1 Sol) checks the findings against the code, sees every reviewer's claim, and marks each one a bug, suspected, pre-existing, or likely not a problem. The comment says how many it checked; findings it did not reach (more than 60, or over the budget) are marked *unverified*.
 5. **Comment.** It opens with a table of findings to check (severity, status, which models found it, where). Below that come collapsed sections: details, duplicates, pre-existing bugs, findings the judge dismissed (with its reason), and housekeeping. A last line gives what the review cost.
+
+#### Set it up in a repository
+
+1. **Secrets.** Make `OPENROUTER_API_KEY` and `ANTHROPIC_API_KEY` available to the repository, preferably as organization secrets so that each repository needs nothing. The secrets table below says what limits to put on them.
+2. **One workflow file.** Copy the example below to `.github/workflows/ai-review.yml` and pin it to a commit (see [Versioning](#versioning)). `v2.0.0` and earlier tags don't have this workflow.
+3. **Nothing else is required.** Without a config, every changed file gets the full review with the default prompt. Add `.github/ai-review/config.toml` or `threat_model.md` only to change that (see [Repository config](#repository-config)).
+4. **Try it.** Add the `ai-review` label to a PR, or comment `/review` on it. The comment arrives in 15–35 minutes.
 
 ```yaml
 name: AI Review
 
+# Comment `/review` on a PR, or add a label starting with `ai-review`.
 on:
   issue_comment:
     types: [created]
+  pull_request:
+    types: [labeled]
 
 permissions: {}
 
 jobs:
   review:
-    if: |
-      github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '/review') &&
-      contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    # Adding a label needs triage or write access. Fork PRs are refused here and again in the workflow.
+    if: >
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+        (github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, fromJSON('"/review\n"')) || startsWith(github.event.comment.body, fromJSON('"/review\r"')))
+      ) ||
+      (
+        github.event_name == 'pull_request' &&
+        startsWith(github.event.label.name, 'ai-review') &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      )
     uses: yetanotherco/actions/.github/workflows/pr_review_multi.yml@<tag commit SHA> # <tag>
     permissions:
       contents: read
@@ -248,7 +267,7 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
-The workflow also accepts `pull_request` events, for example a `labeled` trigger. Block fork PRs in the caller's `if`, as in the examples above. The workflow refuses them too.
+The comment check matches `/review` alone or followed by options, not words that merely start with it (`/reviewer`). The label branch skips fork PRs, which get no secrets on `pull_request` events; the workflow refuses them too. The label runs the PR's version of this caller file, so a change to its inputs applies to that PR's own review.
 
 **Commands.** Options go after the command, on the first line of the comment:
 
@@ -337,6 +356,8 @@ Each OpenRouter model is called through a preset (`model@preset/air-...`, listed
 ---
 
 ## Setup
+
+For the multi-model review, follow [Set it up in a repository](#set-it-up-in-a-repository) instead. For the single-model reviews:
 
 1. Add the required API key as a secret in your repository settings
 2. Create a workflow file in `.github/workflows/` using one of the examples above
