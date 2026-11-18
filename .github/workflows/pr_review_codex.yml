@@ -36,21 +36,21 @@ jobs:
     # drop-sudo aborts on ubuntu-26.04 (openai/codex-action#188); move back to
     # ubuntu-latest once a codex-action release fixes it.
     runs-on: ubuntu-24.04
+    # The job that runs the model only reads; post_feedback posts the comment.
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read
     outputs:
       final_message: ${{ steps.codex.outputs.final-message }}
 
     steps:
       - name: Block fork PRs
-        if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
-          HEAD=$(gh api "${{ github.event.issue.pull_request.url }}" --jq '.head.repo.full_name')
-          BASE=$(gh api "${{ github.event.issue.pull_request.url }}" --jq '.base.repo.full_name')
-          [[ "$HEAD" == "$BASE" ]] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
+          [ "$(gh pr view "$PR_NUMBER" --json isCrossRepository --jq .isCrossRepository)" = false ] || { echo "::error::Fork PR blocked to protect secrets"; exit 1; }
 
       - name: Load prompt
         id: prompt
@@ -76,13 +76,12 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
-          PR_NUMBER=${{ github.event.pull_request.number || github.event.issue.number }}
-          echo "number=$PR_NUMBER" >> $GITHUB_OUTPUT
-          PR_DATA=$(gh pr view $PR_NUMBER --repo ${{ github.repository }} --json baseRefName,headRefOid,baseRefOid)
-          echo "base_ref=$(echo $PR_DATA | jq -r '.baseRefName')" >> $GITHUB_OUTPUT
-          echo "head_sha=$(echo $PR_DATA | jq -r '.headRefOid')" >> $GITHUB_OUTPUT
-          echo "base_sha=$(echo $PR_DATA | jq -r '.baseRefOid')" >> $GITHUB_OUTPUT
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          gh pr view "$PR_NUMBER" --json baseRefName,headRefOid,baseRefOid \
+            --jq '"base_ref=\(.baseRefName)\nhead_sha=\(.headRefOid)\nbase_sha=\(.baseRefOid)"' >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
