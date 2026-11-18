@@ -3542,6 +3542,18 @@ def malicious_lines(ctx: dict) -> list[str]:
     return out
 
 
+def lane_failure(r: dict) -> str:
+    """A few words on why a reviewer did not finish, for the public comment (never the raw error)."""
+    e = str(r.get("error") or "")
+    if r.get("status") == "killed":
+        return "stopped by the run cap" if "run cap" in e else "stopped"
+    for needle, words in (("empty output", "empty answer"), ("timeout", "timed out"),
+                          ("not parseable", "unreadable answer"), ("degenerate", "answered without reading the code")):
+        if needle in e:
+            return words
+    return "error, see the run log"
+
+
 def pr_comment(ctx: dict) -> str:
     """The comment to post on the PR (2026-11-12): one table of what to look at (bug, found by,
     severity), and everything the judge set aside collapsed below with its reason, so a human or another
@@ -3608,7 +3620,17 @@ def pr_comment(ctx: dict) -> str:
     rejected = sorted([f for f in merged if f.get("section") == "Likely non-issues"], key=key)
     out = [f"## AI security review: {len(shown)} finding(s) to check", ""]
     judged = [f for f in merged if (f.get("verification") or {}).get("status") == "ok"]
-    if not ran:
+    units = [u for u in ctx.get("units", []) if u.get("code_files")]
+    if not ran and not units and ctx.get("units"):
+        kinds: dict[str, int] = {}
+        for f in ctx.get("filtered") or []:
+            kinds[f.get("kind", "other")] = kinds.get(f.get("kind", "other"), 0) + 1
+        what = ", ".join(f"{n} {'test' if k == 'test' else 'docs' if k == 'docs' else 'other'} file(s)"
+                         for k, n in sorted(kinds.items()))
+        out.append("**No security review: this PR changes no code**" + (f" (only {what})" if what else "")
+                   + ". The security reviewers read code only; tests, build files and dependencies go to the "
+                     "malicious-code check.")
+    elif not ran:
         out.append("No reviewer finished.")
     else:
         out.append("Reviewed by " + ", ".join(LANE_DISPLAY.get(x, x) for x in ran) + ". "
@@ -3618,13 +3640,22 @@ def pr_comment(ctx: dict) -> str:
                       + "." if merged else ""))
     if ctx.get("run_status") not in (None, "ok"):
         out.append(f"**The review stopped early** ({ctx.get('run_status')}): {_cell(ctx.get('stop_reason') or 'see the run log', 200)}")
-    units = [u for u in ctx.get("units", []) if u.get("code_files")]
-    skipped = [u for u in units if str(u.get("status", "")).startswith(("not reviewed", "partially reviewed"))]
-    if skipped:
-        why = sorted({(re.search(r"\(([^)]*)\)", str(u.get("status", ""))) or [None, "?"])[1] for u in skipped})
-        out.append(f"**Partial review: this PR was not fully reviewed** ({', '.join(why)}). Comment "
-                   f"`{ctx.get('continue_command') or '/review continue'}` to finish it, with a new budget; reviewers "
-                   "that finished are reused.")
+    cont = f"`{ctx.get('continue_command') or '/review continue'}`"
+    failed = [r for r in ctx.get("lane_rows", []) if r.get("mode") in MODES and r.get("status") != "ok"]
+    if failed and ran:   # the code was still reviewed, by the reviewers that finished
+        names = sorted({LANE_DISPLAY.get(r["lane"], r["lane"]) + f" ({lane_failure(r)})" for r in failed})
+        whole = all(not str(u.get("status", "")).startswith("not reviewed") for u in units)
+        out.append(f"{', '.join(names)} did not finish; "
+                   + ", ".join(LANE_DISPLAY.get(x, x) for x in ran)
+                   + (" reviewed the whole PR" if whole else " finished") + f". Comment {cont} to retry, with a new "
+                   "budget; reviewers that finished are reused.")
+    skipped = [u for u in units if str(u.get("status", "")).startswith("not reviewed")]
+    if skipped:   # code no reviewer saw
+        parts = [f"{_cell(u.get('name', u.get('uid', '?')), 80)} ({u.get('code_files')} code file(s); "
+                 + ((re.search(r"\(([^)]*)\)", str(u.get("status", ""))) or [None, "no reviewer finished"])[1]) + ")"
+                 for u in skipped]
+        out.append(f"**Partial review: no reviewer finished on {'; '.join(parts)}**. Comment {cont} to finish it, "
+                   "with a new budget; reviewers that finished are reused.")
     nr = ctx.get("not_reviewed") or {}
     nr_files, unlisted = nr.get("files") or [], nr.get("unlisted") or 0
     if nr_files or unlisted:

@@ -112,14 +112,36 @@ class PrComment(unittest.TestCase):
         c["not_reviewed"] = {"files": [], "unlisted": 0}
         self.assertNotIn("Not reviewed", rp.pr_comment(c))
 
-    def test_failed_reviewers_mark_the_review_partial(self):
+    def test_a_failed_reviewer_is_named_and_the_review_is_not_called_partial(self):
         c = ctx("x")
+        c["run_status"] = "ok"
+        c["lane_rows"].append({"lane": "deepseek", "mode": "agentic", "status": "failed",
+                               "error": "output not parseable as findings JSON: empty output <secret?>"})
         c["units"] = [{"name": "whole PR", "code_files": 2, "status": "partially reviewed (reviewers failed)"}]
         out = rp.pr_comment(c)
-        self.assertIn("**Partial review: this PR was not fully reviewed** (reviewers failed). Comment "
-                      "`/review continue` to finish it", out)
+        self.assertIn("Reviewed by Opus, GPT.", out)
+        self.assertIn("DeepSeek (empty answer) did not finish; Opus, GPT reviewed the whole PR. Comment "
+                      "`/review continue` to retry", out)
+        self.assertNotIn("Partial review", out)
+        self.assertNotIn("secret", out)   # never the raw error
+        c["lane_rows"].pop()
         c["units"] = [{"name": "whole PR", "code_files": 2, "status": "reviewed"}]
-        self.assertNotIn("Partial review", rp.pr_comment(c))
+        self.assertNotIn("did not finish", rp.pr_comment(c))
+
+    def test_code_no_reviewer_saw_is_a_partial_review(self):
+        c = ctx("x")
+        c["units"] = [{"name": "whole PR", "code_files": 2, "status": "not reviewed (run cap)"}]
+        self.assertIn("**Partial review: no reviewer finished on whole PR (2 code file(s); run cap)**. Comment "
+                      "`/review continue` to finish it", rp.pr_comment(c))
+
+    def test_a_pr_without_code_says_so(self):
+        c = ctx("x") | {"merged": [], "lane_rows": [], "run_status": "ok", "not_reviewed": {}}
+        c["units"] = [{"name": "whole PR", "code_files": 0, "test_files": 2, "status": "not reviewed"}]
+        c["filtered"] = [{"file": "tests/a.rs", "kind": "test"}, {"file": "tests/b.rs", "kind": "test"},
+                         {"file": "README.md", "kind": "docs"}]
+        out = rp.pr_comment(c)
+        self.assertIn("**No security review: this PR changes no code** (only 1 docs file(s), 2 test file(s))", out)
+        self.assertNotIn("No reviewer finished", out)
 
     def test_a_confirmed_bug_is_not_folded_into_a_dismissed_duplicate(self):
         c = ctx("x")
