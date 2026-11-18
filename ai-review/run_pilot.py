@@ -4373,8 +4373,10 @@ def main() -> None:
     lane_wt = isolated_checkout(args.repo, head, mb, scratch / "isolated" / run_dir.name)
     log(f"lanes review an isolated checkout (head + merge-base only, no remote): {lane_wt}")
     sandbox_selfcheck(args, lane_wt, run_dir, prices)
+    reuse = reuse_plan(args, units, head, mb)
+    or_est = openrouter_estimate(args, units, prompts, hprices, prices, est_total, est_ver, reuse)
     run_paid(args, run_dir, meta, lane_wt, mb, head, plan, base_values, template, routing, prices, hprices,
-             est_total, tag)
+             est_total, tag, or_est, reuse)
 
 
 def make_undumpable() -> None:
@@ -4470,8 +4472,79 @@ def sandbox_selfcheck(args, wt: Path, run_dir: Path, prices: dict) -> None:
                  + " (workflow input sandbox_check: warn, or runner flag --sandbox-check warn, runs anyway)")
 
 
+def reuse_plan(args, units, head: str, mb: str) -> tuple[Path | None, set[str], set[str]]:
+    """--reuse-from: (earlier run dir, the mode:lane keys that may be reused, units that may not). Reuse only
+    what still means the same thing: same head, same merge-base (a retargeted PR has another diff in the
+    same files), and per unit the same files (unit ids are positional, and the base branch's config or the
+    runner may have changed in between)."""
+    reuse_dir = Path(args.reuse_from) if args.reuse_from else None
+    if reuse_dir and args.reuse_lanes.strip() == "all":   # every mode:lane; only status-ok results are reused
+        reuse = {f"{m}:{x}" for m in MODES for x in LANES}
+    else:
+        reuse = ({x if ":" in x else f"agentic:{x}" for x in args.reuse_lanes.split(",") if x.strip()}
+                 if reuse_dir else set())
+    stale_units: set[str] = set()
+    if reuse_dir:
+        try:
+            old_sum = json.loads((reuse_dir / "summary.json").read_text())
+            old_plan = {x["uid"]: sorted(x.get("files") or [])
+                        for x in json.loads((reuse_dir / "plan.json").read_text())["units"]}
+            if old_sum.get("head") != head:
+                log(f"--reuse-from: earlier run reviewed {old_sum.get('head')}, not {head}: nothing reused")
+                reuse = set()
+            elif old_sum.get("base") != mb:
+                log(f"--reuse-from: earlier run's merge-base was {old_sum.get('base')}, not {mb}: nothing reused")
+                reuse = set()
+            stale_units = {u.uid for u in units if old_plan.get(u.uid) != sorted(u.files)}
+            if stale_units:
+                log(f"--reuse-from: units with other files than in the earlier run, not reused: "
+                    f"{', '.join(sorted(stale_units))}")
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log(f"--reuse-from {reuse_dir}: unreadable summary.json/plan.json ({e}): nothing reused")
+            reuse = set()
+    return reuse_dir, reuse, stale_units
+
+
+def reused_result(reuse_dir: Path | None, reuse: set[str], stale_units: set[str], u, m: str, x: str) -> dict | None:
+    """The earlier run's result for this unit, mode and lane, if it can be reused."""
+    if reuse_dir is None or f"{m}:{x}" not in reuse or u.uid in stale_units:
+        return None
+    try:
+        r = json.loads((reuse_dir / "units" / u.uid / m / x / "result.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(r, dict) or r.get("status") != "ok" or not isinstance(r.get("findings", []), list):
+        return None
+    # an artifact is outside data: keep only well-formed findings
+    r["findings"] = [f for f in r.get("findings", []) if isinstance(f, dict)
+                     and all(isinstance(f.get(k), str) for k in ("title", "file", "category"))
+                     and f.get("severity") in SEVERITIES]
+    return r
+
+
+def openrouter_estimate(args, units, prompts: dict, hprices: dict, prices: dict, est_total: float, est_ver: float,
+                        reuse: tuple) -> float:
+    """What the pre-flight check holds against OpenRouter credit: the estimate without the lanes Anthropic
+    bills (--claude-auth anthropic; subscription lanes are not in est_total) and without reused lanes."""
+    out = est_total
+    for u in units:
+        for m in args.mode_list:
+            for x in u.lanes:
+                claude = LANES[x][0] == "claude"
+                if args.claude_auth == "subscription" and claude:
+                    continue   # not in est_total
+                if (args.claude_auth == "anthropic" and claude) or reused_result(*reuse, u, m, x) is not None:
+                    pc = len(prompts.get((u.uid, m), ""))
+                    out -= (est_agentic(hprices, x, LANES[x][1], pc) if m == "agentic"
+                            else est_static(prices, LANES[x][1], pc, x))
+    if args.claude_auth == "anthropic" and LANES.get(args.judge, ("",))[0] == "claude":
+        out -= est_ver
+    return max(0.0, out)
+
+
 def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan: dict, base_values: dict,
-             template: str, routing: Routing, prices: dict, hprices: dict, est_total: float, tag: str) -> None:
+             template: str, routing: Routing, prices: dict, hprices: dict, est_total: float, tag: str,
+             or_est: float | None = None, reuse: tuple = (None, set(), set())) -> None:
     units = plan["units"]
     iso, iso_note = resolve_isolation(args.isolate)
     if iso == "keys" and not mgmt_key_available():
@@ -4499,8 +4572,10 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
     rems = [x for x in (before.get("limit_remaining"), (acct_before or {}).get("remaining"), exp_left)
             if x is not None]
     remaining = min(rems) if rems else None
-    why = preflight_abort(est_total, args.run_cap, remaining, args.min_remaining, args.allow_over_remaining)
-    write_json(run_dir / "preflight.json", {"estimate_total": est_total, "run_cap": args.run_cap,
+    or_est = est_total if or_est is None else or_est
+    why = preflight_abort(or_est, args.run_cap, remaining, args.min_remaining, args.allow_over_remaining)
+    write_json(run_dir / "preflight.json", {"estimate_total": est_total, "estimate_openrouter": or_est,
+                                            "run_cap": args.run_cap,
                                             "remaining": remaining, "min_remaining": args.min_remaining,
                                             "allow_over_remaining": args.allow_over_remaining,
                                             "isolation": iso, "isolation_note": iso_note, "abort": why})
@@ -4732,46 +4807,10 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
         # of one (unit, mode) run in parallel. Per (unit, mode) rather than per mode across units
         # keeps --pr-budget gating per unit: a unit runs in all modes or in none, and the gate
         # sees the spend of every earlier unit.
-        reuse_dir = Path(args.reuse_from) if args.reuse_from else None
-        if reuse_dir and args.reuse_lanes.strip() == "all":   # every mode:lane; only status-ok results are reused
-            reuse = {f"{m}:{x}" for m in MODES for x in LANES}
-        else:
-            reuse = ({x if ":" in x else f"agentic:{x}" for x in args.reuse_lanes.split(",") if x.strip()}
-                     if reuse_dir else set())
-        # Reuse only what still means the same thing: same head, and per unit the same files (unit ids
-        # are positional, and the base branch's config or the runner may have changed in between).
-        stale_units: set[str] = set()
-        if reuse_dir:
-            try:
-                old_sum = json.loads((reuse_dir / "summary.json").read_text())
-                old_plan = {x["uid"]: sorted(x.get("files") or [])
-                            for x in json.loads((reuse_dir / "plan.json").read_text())["units"]}
-                if old_sum.get("head") != head:
-                    log(f"--reuse-from: earlier run reviewed {old_sum.get('head')}, not {head}: nothing reused")
-                    reuse = set()
-                stale_units = {u.uid for u in units if old_plan.get(u.uid) != sorted(u.files)}
-                if stale_units:
-                    log(f"--reuse-from: units with other files than in the earlier run, not reused: "
-                        f"{', '.join(sorted(stale_units))}")
-            except (OSError, ValueError, KeyError, TypeError) as e:
-                log(f"--reuse-from {reuse_dir}: unreadable summary.json/plan.json ({e}): nothing reused")
-                reuse = set()
+        reuse_dir, reuse, stale_units = reuse
 
         def reused_row(u, m: str, x: str) -> dict | None:
-            """The earlier run's result for this unit, mode and lane, if it can be reused."""
-            if f"{m}:{x}" not in reuse or u.uid in stale_units:
-                return None
-            try:
-                r = json.loads((reuse_dir / "units" / u.uid / m / x / "result.json").read_text())
-            except (OSError, ValueError):
-                return None
-            if not isinstance(r, dict) or r.get("status") != "ok" or not isinstance(r.get("findings", []), list):
-                return None
-            # an artifact is outside data: keep only well-formed findings
-            r["findings"] = [f for f in r.get("findings", []) if isinstance(f, dict)
-                             and all(isinstance(f.get(k), str) for k in ("title", "file", "category"))
-                             and f.get("severity") in SEVERITIES]
-            return r
+            return reused_result(reuse_dir, reuse, stale_units, u, m, x)
 
         # One unit (the whole PR). The watchdog stops it at the run cap; there is no start gate, since
         # skipping the only unit would leave the PR unreviewed.
