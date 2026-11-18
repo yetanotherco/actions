@@ -298,6 +298,16 @@ class RustTestRanges(unittest.TestCase):
         text = self.CODE + self.MOD.replace("    #[test]\n", '    // "{"\n    #[test]\n')
         self.assertEqual(seed.rust_test_ranges(text), [[6, 11]])
 
+    def test_cfg_test_on_an_item_does_not_mark_the_next_module(self):
+        evil = "pub mod evil {\n    pub fn ok() -> bool { true }\n}\n"
+        for attr in ("#[cfg(test)] use super::*;\n", "#[cfg(test)] #[macro_use] extern crate q;\n"):
+            with self.subTest(attr=attr):
+                self.assertEqual(seed.rust_test_ranges(attr + evil), [])
+        # alone, or followed by attributes or a comment, it still marks the module
+        for attr in ("#[cfg(test)] // unit tests\n", "#[cfg(test)] #[allow(dead_code)]\n"):
+            with self.subTest(attr=attr):
+                self.assertEqual(seed.rust_test_ranges(attr + self.MOD[13:]), [[1, 5]])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

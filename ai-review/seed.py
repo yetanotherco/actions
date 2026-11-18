@@ -351,7 +351,9 @@ def _blobs(wt: Path, specs: list[str]) -> dict[str, str]:
     return out
 
 
-_CFG_TEST = re.compile(r"^\s*#\[cfg\(\s*test\s*\)\]")
+# `#[cfg(test)]` that applies to the next line: alone, or followed only by attributes or a comment. With an
+# item after it on the same line (`#[cfg(test)] use super::*;`) it says nothing about the next `mod`.
+_CFG_TEST = re.compile(r"^\s*#\[cfg\(\s*test\s*\)\]\s*(?:#\[[^\]]*\]\s*)*(?://.*)?$")
 _MOD_OPEN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{")
 
 
