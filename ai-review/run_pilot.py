@@ -174,9 +174,6 @@ CATEGORIES = [
     "authz/authn", "injection", "DoS/resource", "memory safety/panic", "supply chain",
     "logic", "other", "docs",
 ]
-# Verifier may never dismiss these (at most Bug -> Suspected).
-# Unused since 2026-11-12 (the judge may dismiss any category; see apply_verdict). Kept for reference.
-PROTECTED_CATEGORIES = {"soundness", "crypto misuse", "key/secret handling", "authz/authn"}
 
 LANE_TIMEOUT_S = 35 * 60     # hard stop: 5 min after the soft time limit, to write the answer
 STATIC_TIMEOUT_S = 15 * 60
@@ -1337,7 +1334,8 @@ def write_zsh_gate(zdotdir: Path, flag: Path) -> None:
 # on 2026-11-11: denied paths answer "Operation not permitted". Extra entries (other checkouts of
 # the repository under review, e.g. cargo git checkouts) are added per run in main().
 LANE_READ_DENY = ["~/workspace", "~/.ssh", "~/.aws", "~/.config", "~/.claude", "~/.codex",
-                  "~/.gnupg", "~/Library/Keychains", "~/.netrc", "~/.docker", "~/.kube", "~/.cargo/credentials.toml"]
+                  "~/.gnupg", "~/Library/Keychains", "~/.netrc", "~/.docker", "~/.kube", "~/.cargo/credentials.toml",
+                  "~/.npmrc", "~/.yarnrc.yml", "~/.git-credentials", "~/.pypirc", "~/.gem/credentials"]
 LANE_READ_DENY_EXTRA: list[str] = []
 SCRATCH_DENY_ROOT = "~/.cache/ai-review"   # clones and other runs' checkouts: denied entry by entry
 
@@ -1538,6 +1536,37 @@ def save_codex_trace(home: Path, dest: Path) -> dict:
             "window": max(windows, default=0)}
 
 
+RETRY_ANSWER_PROMPT = ("Your last turn ended without an answer. Do not run more commands: write your final "
+                       "answer now, only the single JSON object described in the first message.")
+RETRY_TIMEOUT_S = 10 * 60
+
+
+def codex_thread_id(events: Path) -> str:
+    for line in events.read_text(errors="replace").splitlines()[:5]:
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if e.get("type") == "thread.started":
+            return str(e.get("thread_id") or "")
+    return ""
+
+
+def codex_final_text(events: Path, last: Path) -> str:
+    """The lane's answer: Codex's -o file, else its last agent message."""
+    if last.exists() and last.read_text(errors="replace").strip():
+        return last.read_text(errors="replace")
+    msgs = []
+    for line in events.read_text(errors="replace").splitlines() if events.exists() else []:
+        try:
+            it = json.loads(line).get("item") or {}
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        if it.get("type") == "agent_message":
+            msgs.append(it.get("text", ""))
+    return msgs[-1] if msgs else ""
+
+
 def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: Path, wt: Path,
               out_dir: Path, key: str, prices: dict, timeout: int, lane_cap: float | None = None,
               label: str = "", estimate_cap: bool = True, soft: dict | None = None,
@@ -1572,6 +1601,24 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
                      soft, flag if soft else None)
     rc, wall, timed_out, killed = _popen_with_timeout(cmd, wt, env, prompt, out_dir / "events.jsonl",
                                                       out_dir / "stderr.txt", timeout, tail, label)
+    retried = False
+    if rc == 0 and not (killed or timed_out) and not codex_final_text(out_dir / "events.jsonl", last).strip():
+        # An empty answer (seen 2026-11-18: DeepSeek's last request hit the provider's 8,000-token output
+        # default while still reasoning). Ask once more, in the same session, for the answer only.
+        tid = codex_thread_id(out_dir / "events.jsonl")
+        if tid:
+            retried = True
+            log(f"{label or name}: empty answer; asking once more for the final JSON")
+            rcmd = ["codex", "exec", "resume", "--json", "--skip-git-repo-check", "--ignore-rules", "-m", sent_model,
+                    "-c", f'model_reasoning_effort="{effort}"', *schema_args, "-o", str(last), tid, "-"]
+            rc, w2, timed_out, killed = _popen_with_timeout(
+                rcmd, wt, env, RETRY_ANSWER_PROMPT, out_dir / "events_retry.jsonl", out_dir / "stderr_retry.txt",
+                RETRY_TIMEOUT_S, None, label)
+            wall += w2
+            for dst, src in (("events.jsonl", "events_retry.jsonl"), ("stderr.txt", "stderr_retry.txt")):
+                with open(out_dir / dst, "a") as f:   # one stream each: usage, messages and errors of both runs
+                    f.write((out_dir / src).read_text(errors="replace"))
+    mask_file_in_place(last)
     del env
     ctxinfo: dict = {}
     try:
@@ -1588,7 +1635,7 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
             events.append(json.loads(line))
         except json.JSONDecodeError:
             pass
-    tool_calls, warnings, errors, msgs = 0, [], [], []
+    tool_calls, warnings, errors = 0, [], []
     usage = {"input": 0, "cached": 0, "output": 0, "reasoning": 0}
     for e in events:
         t = e.get("type")
@@ -1599,8 +1646,6 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
                 tool_calls += 1
             elif it_t == "error":
                 warnings.append(it.get("message", ""))
-            elif it_t == "agent_message":
-                msgs.append(it.get("text", ""))
         elif t == "turn.completed":
             u = e.get("usage") or {}
             usage["input"] += u.get("input_tokens", 0)
@@ -1640,8 +1685,10 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
         # not shown, or counted against the budget, as $0
         res["computed_cost"] = round(tail.estimated_cost(), 6)
         res["warnings"].append("computed cost is an ESTIMATE: the lane ended before Codex reported usage")
-    final = last.read_text(errors="replace") if last.exists() else (msgs[-1] if msgs else "")
-    res["final_text"] = final
+    res["final_text"] = codex_final_text(out_dir / "events.jsonl", last)
+    if retried:
+        res["warnings"].append("empty answer; asked once more for the answer"
+                               + ("" if res["final_text"].strip() else ", still empty"))
     if killed:
         killed_result(res, killed)
     elif timed_out:
@@ -1657,9 +1704,7 @@ def run_codex(name: str, model: str, sent_model: str, prompt: str, schema_path: 
 
 def claude_settings(wt: Path) -> dict:
     home = "~"
-    sensitive = [f"{home}/.ssh", f"{home}/.aws", f"{home}/.config", f"{home}/.claude", f"{home}/.codex",
-                 f"{home}/.gnupg", f"{home}/Library/Keychains", f"{home}/.netrc", f"{home}/.docker",
-                 f"{home}/.kube", f"{home}/.cargo/credentials.toml"]
+    sensitive = [d.replace("~", home, 1) for d in LANE_READ_DENY if d != "~/workspace"]
     # Like the Codex profile (LANE_READ_DENY): no ~/workspace (scoring sheets, earlier reports, other
     # checkouts) and nothing else under the cache dir but this lane's own checkout. A deny can't be
     # overridden by an allow, so the cache dir's other entries are listed one by one (Fable review,
