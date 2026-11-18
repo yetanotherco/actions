@@ -2171,6 +2171,17 @@ def housekeeping_items(ctx: dict) -> list[dict]:
     return [it for r in ctx.get("aux_rows", []) if r.get("lane") == "housekeeping" for it in r.get("housekeeping") or []]
 
 
+def verification_queue(merged: list[dict], verify_min: str) -> list[dict]:
+    """The findings the judge checks, most severe first so --max-verify and the budget cut the least severe
+    ones. Docs findings are judged too. The rest get the reason they were skipped."""
+    sev_ok = {s for s in SEVERITIES if SEV_RANK[s] <= SEV_RANK[verify_min]}
+    queue = sorted((f for f in merged if f["severity"] in sev_ok), key=lambda f: SEV_RANK.get(f["severity"], 9))
+    for f in merged:
+        if f not in queue:
+            f["verify_skipped"] = f"severity {f['severity']} below verification threshold"
+    return queue
+
+
 def parse_lane_findings(res: dict, out_dir: Path, agentic: bool = True) -> None:
     """Attach findings to a finder lane result; a lane whose output cannot be parsed, or an
     agentic lane that never called a tool, is failed (it must not look like "no findings")."""
@@ -4971,14 +4982,7 @@ def run_paid(args, run_dir: Path, meta: dict, wt: Path, mb: str, head: str, plan
             log(f"planted {n} known-false finding(s) for the judge (--plant)")
 
         # Phase: verification, once over the union of modes and units
-        sev_ok = {s for s in SEVERITIES if SEV_RANK[s] <= SEV_RANK[args.verify_min]}
-        # most severe first, so --max-verify and the budget cut the least severe ones
-        to_verify = sorted((f for f in merged if f["severity"] in sev_ok and f["category"] != "docs"),
-                           key=lambda f: SEV_RANK.get(f["severity"], 9))
-        for f in merged:
-            if f not in to_verify:
-                f["verify_skipped"] = f"severity {f['severity']} below verification threshold" \
-                    if f["category"] != "docs" else "docs finding"
+        to_verify = verification_queue(merged, args.verify_min)
         if args.no_verify:
             verify_note = "skipped (--no-verify)"
             for f in to_verify:
