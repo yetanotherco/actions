@@ -121,6 +121,14 @@ class PrComment(unittest.TestCase):
         c["units"] = [{"name": "whole PR", "code_files": 2, "status": "reviewed"}]
         self.assertNotIn("Partial review", rp.pr_comment(c))
 
+    def test_a_confirmed_bug_is_not_folded_into_a_dismissed_duplicate(self):
+        c = ctx("x")
+        c["merged"] = [finding("M1", "Likely non-issues", "a") | {"final_severity": "low"},
+                       finding("M2", "Bugs", "b") | {"verification": {"status": "ok", "applied": {
+                           "reason": "b", "duplicate_of": "M1"}}}]
+        rows = [ln for ln in rp.pr_comment(c).split("\n") if ln.startswith("| M")]
+        self.assertTrue(rows[0].startswith("| M2 | b (also M1) | high | Bug |"), rows[0])
+
     def test_cost_line_shared_mode_excludes_reused_rows(self):
         line = rp.cost_line(ctx("x"))
         self.assertIn("~$1.51 of a $20 budget", line)   # 1.5 gpt + 0.01 housekeeping; reused Opus not counted

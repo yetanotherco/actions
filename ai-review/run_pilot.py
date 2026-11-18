@@ -3563,6 +3563,21 @@ def pr_comment(ctx: dict) -> str:
             seen.add(dup_of[d]); dup_of[d] = dup_of[dup_of[d]]
         if dup_of[d] == d:
             del dup_of[d]
+    # The row kept for a group is its strongest finding, not the judge's choice: a confirmed bug never
+    # disappears into a finding the judge dismissed, and the higher severity stays.
+    strength = {"Bugs": 0, "Suspected": 1, "Pre-existing": 2, "Likely non-issues": 3}
+    groups: dict[str, list[str]] = {}
+    for d, t in dup_of.items():
+        if t not in dup_of:
+            groups.setdefault(t, [t]).append(d)
+    for t, members in groups.items():
+        rep = min(members, key=lambda m: (strength.get(by_mid[m].get("section"), 4),
+                                          SEV_RANK.get(by_mid[m].get("final_severity"), 9), members.index(m)))
+        if rep != t:
+            del dup_of[rep]
+            for m in members:
+                if m != rep:
+                    dup_of[m] = rep
     lanes_of = {f["mid"]: list(f.get("lanes_found") or [f.get("lane", "?")]) for f in merged}
     also = {}
     for d, t in dup_of.items():
